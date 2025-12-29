@@ -25,193 +25,279 @@
 //  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "VROKeyframeAnimation.h"
-#include "VROTransaction.h"
-#include "VROLog.h"
 #include "VROAnimationFloat.h"
-#include "VROGeometry.h"
-#include "VROAnimationVector3f.h"
 #include "VROAnimationQuaternion.h"
-#include "VROShaderModifier.h"
-#include "VRONode.h"
+#include "VROAnimationVector3f.h"
+#include "VROGeometry.h"
+#include "VROLog.h"
 #include "VROMorpher.h"
-#include <sstream>
+#include "VRONode.h"
+#include "VROShaderModifier.h"
+#include "VROTransaction.h"
 #include <map>
+#include <sstream>
 
 std::shared_ptr<VROExecutableAnimation> VROKeyframeAnimation::copy() {
-    std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> frames;
-    for (std::unique_ptr<VROKeyframeAnimationFrame> &origFrame : _frames) {
-        std::unique_ptr<VROKeyframeAnimationFrame> frame = std::unique_ptr<VROKeyframeAnimationFrame>(new VROKeyframeAnimationFrame());
-        frame->time = origFrame->time;
-        frame->translation = origFrame->translation;
-        frame->scale = origFrame->scale;
-        frame->rotation = origFrame->rotation;
-        frame->morphWeights = origFrame->morphWeights;
+  std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> frames;
+  for (std::unique_ptr<VROKeyframeAnimationFrame> &origFrame : _frames) {
+    std::unique_ptr<VROKeyframeAnimationFrame> frame =
+        std::unique_ptr<VROKeyframeAnimationFrame>(
+            new VROKeyframeAnimationFrame());
+    frame->time = origFrame->time;
+    frame->translation = origFrame->translation;
+    frame->scale = origFrame->scale;
+    frame->rotation = origFrame->rotation;
+    frame->morphWeights = origFrame->morphWeights;
 
-        frames.push_back(std::move(frame));
-    }
-    std::shared_ptr<VROKeyframeAnimation> animation = std::make_shared<VROKeyframeAnimation>(frames, _duration, _hasTranslation,
-                                                                                             _hasRotation, _hasScale, _hasMorphWeights,
-                                                                                             _timingFunctionType);
-    animation->setName(_name);
-    animation->setSpeed(_speed);
-    animation->setTimeOffset(_timeOffset);
-    return animation;
+    frame->translationInTangent = origFrame->translationInTangent;
+    frame->translationOutTangent = origFrame->translationOutTangent;
+    frame->scaleInTangent = origFrame->scaleInTangent;
+    frame->scaleOutTangent = origFrame->scaleOutTangent;
+    frame->rotationInTangent = origFrame->rotationInTangent;
+    frame->rotationOutTangent = origFrame->rotationOutTangent;
+
+    frames.push_back(std::move(frame));
+  }
+  std::shared_ptr<VROKeyframeAnimation> animation =
+      std::make_shared<VROKeyframeAnimation>(
+          frames, _duration, _hasTranslation, _hasRotation, _hasScale,
+          _hasMorphWeights, _timingFunctionType);
+  animation->setName(_name);
+  animation->setSpeed(_speed);
+  animation->setTimeOffset(_timeOffset);
+  return animation;
 }
 
-void VROKeyframeAnimation::execute(std::shared_ptr<VRONode> node, std::function<void()> onFinished) {
-    std::weak_ptr<VROKeyframeAnimation> shared_w = shared_from_this();
+void VROKeyframeAnimation::execute(std::shared_ptr<VRONode> node,
+                                   std::function<void()> onFinished) {
+  std::weak_ptr<VROKeyframeAnimation> shared_w = shared_from_this();
 
-    /*
-     Build the key frame animation data.
-     */
-    std::vector<float> keyTimes;
-    std::vector<VROVector3f> translationValues;
-    std::vector<VROVector3f> scaleValues;
-    std::vector<VROQuaternion> rotationValues;
-    std::map<std::string, std::vector<float>> morphWeightValues;
+  /*
+   Build the key frame animation data.
+   */
+  std::vector<float> keyTimes;
+  std::vector<VROVector3f> translationValues;
+  std::vector<VROVector3f> scaleValues;
+  std::vector<VROQuaternion> rotationValues;
+  std::map<std::string, std::vector<float>> morphWeightValues;
 
-    /*
-     Flatten out the data structure so we can pass the keyframes to our
-     animation constructors.
-     */
-    for (std::unique_ptr<VROKeyframeAnimationFrame> &frame : _frames) {
-        keyTimes.push_back(frame->time);
-        if (_hasTranslation) {
-            translationValues.push_back(frame->translation);
-        }
-        if (_hasScale) {
-            scaleValues.push_back(frame->scale);
-        }
-        if (_hasRotation) {
-            rotationValues.push_back(frame->rotation);
-        }
-        if (_hasMorphWeights) {
-            for (auto target : frame->morphWeights) {
-                morphWeightValues[target.first].push_back(target.second);
-            }
-        }
-    }
+  std::vector<VROVector3f> translationInTangents;
+  std::vector<VROVector3f> translationOutTangents;
+  std::vector<VROVector3f> scaleInTangents;
+  std::vector<VROVector3f> scaleOutTangents;
+  std::vector<VROVector4f> rotationInTangents;
+  std::vector<VROVector4f> rotationOutTangents;
 
-    // Assume that all key frames have the same number of targets with weighted data.
-    if (_hasMorphWeights) {
-        for (auto targetWeights : morphWeightValues) {
-            passert(_frames.size() == targetWeights.second.size());
-        }
-    }
-    
-    VROTransaction::begin();
-    VROTransaction::setAnimationDuration(_duration);
-    VROTransaction::setAnimationTimeOffset(_timeOffset);
-    VROTransaction::setAnimationSpeed(_speed);
-    VROTransaction::setTimingFunction(_timingFunctionType);
-    
+  /*
+   Flatten out the data structure so we can pass the keyframes to our
+   animation constructors.
+   */
+  for (std::unique_ptr<VROKeyframeAnimationFrame> &frame : _frames) {
+    keyTimes.push_back(frame->time);
     if (_hasTranslation) {
-        std::shared_ptr<VROAnimation> animation = std::make_shared<VROAnimationVector3f>([shared_w](VROAnimatable *const animatable, VROVector3f v) {
+      translationValues.push_back(frame->translation);
+    }
+    if (_hasScale) {
+      scaleValues.push_back(frame->scale);
+    }
+    if (_hasRotation) {
+      rotationValues.push_back(frame->rotation);
+    }
+
+    if (_timingFunctionType == VROTimingFunctionType::Cubic) {
+      if (_hasTranslation) {
+        translationInTangents.push_back(frame->translationInTangent);
+        translationOutTangents.push_back(frame->translationOutTangent);
+      }
+      if (_hasScale) {
+        scaleInTangents.push_back(frame->scaleInTangent);
+        scaleOutTangents.push_back(frame->scaleOutTangent);
+      }
+      if (_hasRotation) {
+        rotationInTangents.push_back(frame->rotationInTangent);
+        rotationOutTangents.push_back(frame->rotationOutTangent);
+      }
+    }
+
+    if (_hasMorphWeights) {
+      for (auto target : frame->morphWeights) {
+        morphWeightValues[target.first].push_back(target.second);
+      }
+    }
+  }
+
+  // Assume that all key frames have the same number of targets with weighted
+  // data.
+  if (_hasMorphWeights) {
+    for (auto targetWeights : morphWeightValues) {
+      passert(_frames.size() == targetWeights.second.size());
+    }
+  }
+
+  VROTransaction::begin();
+  VROTransaction::setAnimationDuration(_duration);
+  VROTransaction::setAnimationTimeOffset(_timeOffset);
+  VROTransaction::setAnimationSpeed(_speed);
+  VROTransaction::setTimingFunction(_timingFunctionType);
+
+  if (_hasTranslation) {
+    std::shared_ptr<VROAnimation> animation =
+        std::make_shared<VROAnimationVector3f>(
+            [shared_w](VROAnimatable *const animatable, VROVector3f v) {
+              std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
+              if (!shared) {
+                return;
+              }
+              ((VRONode *)animatable)->setPosition(v);
+            },
+            keyTimes, translationValues);
+
+    if (_timingFunctionType == VROTimingFunctionType::Cubic) {
+      animation = std::make_shared<VROAnimationVector3f>(
+          [shared_w](VROAnimatable *const animatable, VROVector3f v) {
             std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
             if (!shared) {
-                return;
+              return;
             }
             ((VRONode *)animatable)->setPosition(v);
-        }, keyTimes, translationValues);
-        
-        node->animate(animation);
+          },
+          keyTimes, translationValues, translationInTangents,
+          translationOutTangents);
     }
-    
-    if (_hasRotation) {
-        std::shared_ptr<VROAnimation> animation = std::make_shared<VROAnimationQuaternion>([shared_w](VROAnimatable *const animatable, VROQuaternion q) {
+
+    node->animate(animation);
+  }
+
+  if (_hasRotation) {
+    std::shared_ptr<VROAnimation> animation =
+        std::make_shared<VROAnimationQuaternion>(
+            [shared_w](VROAnimatable *const animatable, VROQuaternion q) {
+              std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
+              if (!shared) {
+                return;
+              }
+              ((VRONode *)animatable)->setRotation(q);
+            },
+            keyTimes, rotationValues);
+
+    if (_timingFunctionType == VROTimingFunctionType::Cubic) {
+      animation = std::make_shared<VROAnimationQuaternion>(
+          [shared_w](VROAnimatable *const animatable, VROQuaternion q) {
             std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
             if (!shared) {
-                return;
+              return;
             }
             ((VRONode *)animatable)->setRotation(q);
-        }, keyTimes, rotationValues);
-        
-        node->animate(animation);
+          },
+          keyTimes, rotationValues, rotationInTangents, rotationOutTangents);
     }
-    
-    if (_hasScale) {
-        std::shared_ptr<VROAnimation> animation = std::make_shared<VROAnimationVector3f>([shared_w](VROAnimatable *const animatable, VROVector3f v) {
+
+    node->animate(animation);
+  }
+
+  if (_hasScale) {
+    std::shared_ptr<VROAnimation> animation =
+        std::make_shared<VROAnimationVector3f>(
+            [shared_w](VROAnimatable *const animatable, VROVector3f v) {
+              std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
+              if (!shared) {
+                return;
+              }
+              ((VRONode *)animatable)->setScale(v);
+            },
+            keyTimes, scaleValues);
+
+    if (_timingFunctionType == VROTimingFunctionType::Cubic) {
+      animation = std::make_shared<VROAnimationVector3f>(
+          [shared_w](VROAnimatable *const animatable, VROVector3f v) {
             std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
             if (!shared) {
-                return;
+              return;
             }
             ((VRONode *)animatable)->setScale(v);
-        }, keyTimes, scaleValues);
-        
-        node->animate(animation);
+          },
+          keyTimes, scaleValues, scaleInTangents, scaleOutTangents);
     }
 
-    if (_hasMorphWeights) {
-        // Iterate through each target and its vec of keyframe weights and create
-        // a keyframe animation out of them.
-        std::map<std::string, std::vector<float>>::iterator it;
-        for (it = morphWeightValues.begin(); it != morphWeightValues.end(); it++) {
-            std::string morphKey = it->first;
-            const std::vector<float> &morphValues = it->second;
+    node->animate(animation);
+  }
 
-            std::shared_ptr<VROAnimation> animation = std::make_shared<VROAnimationFloat>([shared_w, morphKey](VROAnimatable *const animatable, float value) {
+  if (_hasMorphWeights) {
+    // Iterate through each target and its vec of keyframe weights and create
+    // a keyframe animation out of them.
+    std::map<std::string, std::vector<float>>::iterator it;
+    for (it = morphWeightValues.begin(); it != morphWeightValues.end(); it++) {
+      std::string morphKey = it->first;
+      const std::vector<float> &morphValues = it->second;
+
+      std::shared_ptr<VROAnimation> animation =
+          std::make_shared<VROAnimationFloat>(
+              [shared_w, morphKey](VROAnimatable *const animatable,
+                                   float value) {
                 std::shared_ptr<VROKeyframeAnimation> shared = shared_w.lock();
                 if (!shared) {
-                    return;
+                  return;
                 }
 
-                for (auto morpher: ((VROGeometry *)animatable)->getMorphers()) {
-                    // Avoid a second costly callback by not triggering
-                    // a transaction animation on the VROMorpher itself
-                    morpher.second->setWeightForTarget(morphKey, value, false);
+                for (auto morpher :
+                     ((VROGeometry *)animatable)->getMorphers()) {
+                  // Avoid a second costly callback by not triggering
+                  // a transaction animation on the VROMorpher itself
+                  morpher.second->setWeightForTarget(morphKey, value, false);
                 }
-            }, keyTimes, morphValues);
-            node->getGeometry()->animate(animation);
-        }
+              },
+              keyTimes, morphValues);
+      node->getGeometry()->animate(animation);
     }
+  }
 
-    std::weak_ptr<VROKeyframeAnimation> weakSelf = shared_from_this();
-    VROTransaction::setFinishCallback([weakSelf, onFinished](bool terminate) {
-        std::shared_ptr<VROKeyframeAnimation> keyframeAnim = weakSelf.lock();
-        if (keyframeAnim) {
-            keyframeAnim->_transaction.reset();
-        }
-        onFinished();
-    });
-    
-    std::shared_ptr<VROTransaction> transaction = VROTransaction::commit();
-    transaction->holdExecutableAnimation(shared_from_this());
-    
-    _transaction = transaction;
+  std::weak_ptr<VROKeyframeAnimation> weakSelf = shared_from_this();
+  VROTransaction::setFinishCallback([weakSelf, onFinished](bool terminate) {
+    std::shared_ptr<VROKeyframeAnimation> keyframeAnim = weakSelf.lock();
+    if (keyframeAnim) {
+      keyframeAnim->_transaction.reset();
+    }
+    onFinished();
+  });
+
+  std::shared_ptr<VROTransaction> transaction = VROTransaction::commit();
+  transaction->holdExecutableAnimation(shared_from_this());
+
+  _transaction = transaction;
 }
 
 void VROKeyframeAnimation::pause() {
-    std::shared_ptr<VROTransaction> transaction = _transaction.lock();
-    if (transaction) {
-        VROTransaction::pause(transaction);
-    }
+  std::shared_ptr<VROTransaction> transaction = _transaction.lock();
+  if (transaction) {
+    VROTransaction::pause(transaction);
+  }
 }
 
 void VROKeyframeAnimation::resume() {
-    std::shared_ptr<VROTransaction> transaction = _transaction.lock();
-    if (transaction) {
-        VROTransaction::resume(transaction);
-    }
+  std::shared_ptr<VROTransaction> transaction = _transaction.lock();
+  if (transaction) {
+    VROTransaction::resume(transaction);
+  }
 }
 
 void VROKeyframeAnimation::terminate(bool jumpToEnd) {
-    std::shared_ptr<VROTransaction> transaction = _transaction.lock();
-    if (transaction) {
-        VROTransaction::terminate(transaction, jumpToEnd);
-        _transaction.reset();
-    }
+  std::shared_ptr<VROTransaction> transaction = _transaction.lock();
+  if (transaction) {
+    VROTransaction::terminate(transaction, jumpToEnd);
+    _transaction.reset();
+  }
 }
 
 void VROKeyframeAnimation::setSpeed(float speed) {
-    _speed = speed;
-    std::shared_ptr<VROTransaction> transaction = _transaction.lock();
-    if (transaction) {
-        VROTransaction::setAnimationSpeed(transaction, _speed);
-    }
+  _speed = speed;
+  std::shared_ptr<VROTransaction> transaction = _transaction.lock();
+  if (transaction) {
+    VROTransaction::setAnimationSpeed(transaction, _speed);
+  }
 }
 
 std::string VROKeyframeAnimation::toString() const {
-    std::stringstream ss;
-    ss << "[keyframe: " << _name << "]";
-    return ss.str();
+  std::stringstream ss;
+  ss << "[keyframe: " << _name << "]";
+  return ss.str();
 }

@@ -27,13 +27,14 @@
 #ifndef VROKeyframeAnimation_h
 #define VROKeyframeAnimation_h
 
+#include "VROExecutableAnimation.h"
+#include "VROQuaternion.h"
+#include "VROTimingFunction.h"
+#include "VROVector3f.h"
+#include "VROVector4f.h"
+#include <map>
 #include <memory>
 #include <vector>
-#include <map>
-#include "VROVector3f.h"
-#include "VROQuaternion.h"
-#include "VROExecutableAnimation.h"
-#include "VROTimingFunction.h"
 
 class VROShaderModifier;
 
@@ -41,120 +42,124 @@ class VROShaderModifier;
  Single frame of a keyframe animation.
  */
 struct VROKeyframeAnimationFrame {
-    
-    /*
-     Start time of this frame. Defined between [0, 1], where 0
-     is the start of the animation and 1.0 is the end.
-     */
-    float time;
-    
-    /*
-     The values to assign for translation, rotation, and scale. A given 
-     keyframe does not have to include all of these.
-     */
-    VROVector3f translation;
-    VROVector3f scale;
-    VROQuaternion rotation;
-    std::map<std::string, float> morphWeights;
+
+  /*
+   Start time of this frame. Defined between [0, 1], where 0
+   is the start of the animation and 1.0 is the end.
+   */
+  float time;
+
+  /*
+   The values to assign for translation, rotation, and scale. A given
+   keyframe does not have to include all of these.
+   */
+  VROVector3f translation;
+  VROVector3f scale;
+  VROQuaternion rotation;
+  std::map<std::string, float> morphWeights;
+
+  /*
+   Tangents for Cubic Spline interpolation.
+   */
+  VROVector3f translationInTangent;
+  VROVector3f translationOutTangent;
+  VROVector3f scaleInTangent;
+  VROVector3f scaleOutTangent;
+  VROVector4f rotationInTangent;
+  VROVector4f rotationOutTangent;
 };
 
 /*
  Drives a keyframe animation for a node.
  */
-class VROKeyframeAnimation : public VROExecutableAnimation, public std::enable_shared_from_this<VROKeyframeAnimation> {
-    
+class VROKeyframeAnimation
+    : public VROExecutableAnimation,
+      public std::enable_shared_from_this<VROKeyframeAnimation> {
+
 public:
+  VROKeyframeAnimation(
+      std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> &frames,
+      float duration, bool hasTranslation, bool hasRotation, bool hasScale,
+      float hasMorphWeights,
+      VROTimingFunctionType timingFunctionType = VROTimingFunctionType::Linear)
+      : _hasTranslation(hasTranslation), _hasRotation(hasRotation),
+        _hasScale(hasScale), _hasMorphWeights(hasMorphWeights),
+        _timingFunctionType(timingFunctionType) {
+    _frames = std::move(frames);
+    _duration = duration;
+  }
 
-    VROKeyframeAnimation(std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> &frames,
-                         float duration, bool hasTranslation, bool hasRotation, bool hasScale,
-                         float hasMorphWeights,
-                         VROTimingFunctionType timingFunctionType = VROTimingFunctionType::Linear) :
-                         _hasTranslation(hasTranslation),
-                         _hasRotation(hasRotation), _hasScale(hasScale), _hasMorphWeights(hasMorphWeights),
-                         _timingFunctionType(timingFunctionType) {
-        _frames = std::move(frames);
-        _duration = duration;
-    }
+  virtual ~VROKeyframeAnimation() {}
 
-    virtual ~VROKeyframeAnimation() { }
-    
-    void setName(std::string name) {
-        _name = name;
-    }
-    std::string getName() const {
-        return _name;
-    }
+  void setName(std::string name) { _name = name; }
+  std::string getName() const { return _name; }
 
-    const std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> &getFrames() const {
-        return _frames;
-    }
+  const std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> &
+  getFrames() const {
+    return _frames;
+  }
 
-    void setDuration(float durationSeconds) {
-        _duration = durationSeconds;
-    }
+  void setDuration(float durationSeconds) { _duration = durationSeconds; }
 
-    float getDuration() const {
-        return _duration;
-    }
+  float getDuration() const { return _duration; }
 
-    VROTimingFunctionType getTimingFunctionType() const {
-        return _timingFunctionType;
-    }
+  VROTimingFunctionType getTimingFunctionType() const {
+    return _timingFunctionType;
+  }
 
-    void setSpeed(float speed);
+  void setSpeed(float speed);
 
 #pragma mark - Executable Animation API
-    
-    /*
-     Produce a copy of this animation.
-     */
-    std::shared_ptr<VROExecutableAnimation> copy();
-    
-    /*
-     Execute this animation. The onFinished() callback will be invoked when the
-     animation is fully executed (if it has children, this is when the last child
-     finishes executing).
-     */
-    void execute(std::shared_ptr<VRONode> node, std::function<void()> onFinished);
-    void pause();
-    void resume();
-    void terminate(bool jumpToEnd);
-    void preload() {}
-    const bool _hasTranslation, _hasRotation, _hasScale, _hasMorphWeights;
 
-    std::string toString() const;
+  /*
+   Produce a copy of this animation.
+   */
+  std::shared_ptr<VROExecutableAnimation> copy();
+
+  /*
+   Execute this animation. The onFinished() callback will be invoked when the
+   animation is fully executed (if it has children, this is when the last child
+   finishes executing).
+   */
+  void execute(std::shared_ptr<VRONode> node, std::function<void()> onFinished);
+  void pause();
+  void resume();
+  void terminate(bool jumpToEnd);
+  void preload() {}
+  const bool _hasTranslation, _hasRotation, _hasScale, _hasMorphWeights;
+
+  std::string toString() const;
+
 private:
-    
-    /*
-     The name of this animation.
-     */
-    std::string _name;
-    
-    /*
-     The types of properties animated by this keyframe animation.
-     */
+  /*
+   The name of this animation.
+   */
+  std::string _name;
 
-    /*
-     The animation frames, in order of time.
-     */
-    std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> _frames;
-    
-    /*
-     The duration of this animation in seconds.
-     */
-    float _duration;
+  /*
+   The types of properties animated by this keyframe animation.
+   */
 
-    /*
-     The timing function type for interpolation between keyframes.
-     Default is Linear. STEP interpolation uses VROTimingFunctionType::Step.
-     */
-    VROTimingFunctionType _timingFunctionType;
+  /*
+   The animation frames, in order of time.
+   */
+  std::vector<std::unique_ptr<VROKeyframeAnimationFrame>> _frames;
 
-    /*
-     If the animation is running, this is its associated transaction.
-     */
-    std::weak_ptr<VROTransaction> _transaction;
+  /*
+   The duration of this animation in seconds.
+   */
+  float _duration;
 
+  /*
+   The timing function type for interpolation between keyframes.
+   Default is Linear. STEP interpolation uses VROTimingFunctionType::Step.
+   */
+  VROTimingFunctionType _timingFunctionType;
+
+  /*
+   If the animation is running, this is its associated transaction.
+   */
+  std::weak_ptr<VROTransaction> _transaction;
 };
 
 #endif /* VROKeyframeAnimation_h */

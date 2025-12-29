@@ -25,261 +25,294 @@
 //  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "VROMaterialShaderBinding.h"
-#include "VROShaderProgram.h"
+#include "VRODriver.h"
+#include "VROEye.h"
+#include "VROMaterial.h"
+#include "VROMath.h"
+#include "VROMatrix4f.h"
+#include "VRORenderContext.h"
 #include "VROShaderModifier.h"
+#include "VROShaderProgram.h"
+#include "VROTextureReference.h"
 #include "VROUniform.h"
 #include "VROVector3f.h"
-#include "VROMatrix4f.h"
-#include "VROMaterial.h"
-#include "VROEye.h"
-#include "VRODriver.h"
-#include "VROTextureReference.h"
-#include "VROMath.h"
-#include "VRORenderContext.h"
 
-VROMaterialShaderBinding::VROMaterialShaderBinding(std::shared_ptr<VROShaderProgram> program,
-                                                   VROLightingShaderCapabilities capabilities,
-                                                   const VROMaterial &material) :
-    _program(program),
-    _material(material),
-    lightingShaderCapabilities(capabilities),
-    _diffuseSurfaceColorUniform(nullptr),
-    _diffuseIntensityUniform(nullptr),
-    _alphaUniform(nullptr),
-    _alphaCutoffUniform(nullptr),
-    _shininessUniform(nullptr),
-    _roughnessUniform(nullptr),
-    _roughnessIntensityUniform(nullptr),
-    _metalnessUniform(nullptr),
-    _metalnessIntensityUniform(nullptr),
-    _aoUniform(nullptr),
-    _emissiveColorUniform(nullptr),
-    _normalMatrixUniform(nullptr),
-    _modelMatrixUniform(nullptr),
-    _viewMatrixUniform(nullptr),
-    _projectionMatrixUniform(nullptr),
-    _cameraPositionUniform(nullptr),
-    _eyeTypeUniform(nullptr) {
-    
-    loadUniforms();
-    loadTextures();
+VROMaterialShaderBinding::VROMaterialShaderBinding(
+    std::shared_ptr<VROShaderProgram> program,
+    VROLightingShaderCapabilities capabilities, const VROMaterial &material)
+    : _program(program), _material(material),
+      lightingShaderCapabilities(capabilities),
+      _diffuseSurfaceColorUniform(nullptr), _diffuseIntensityUniform(nullptr),
+      _alphaUniform(nullptr), _alphaCutoffUniform(nullptr),
+      _shininessUniform(nullptr), _roughnessUniform(nullptr),
+      _roughnessIntensityUniform(nullptr), _metalnessUniform(nullptr),
+      _metalnessIntensityUniform(nullptr), _aoUniform(nullptr),
+      _emissiveColorUniform(nullptr), _normalMatrixUniform(nullptr),
+      _modelMatrixUniform(nullptr), _viewMatrixUniform(nullptr),
+      _projectionMatrixUniform(nullptr), _cameraPositionUniform(nullptr),
+      _eyeTypeUniform(nullptr) {
+
+  loadUniforms();
+  loadTextures();
 }
 
-VROMaterialShaderBinding::~VROMaterialShaderBinding() {
-    
-}
+VROMaterialShaderBinding::~VROMaterialShaderBinding() {}
 
 void VROMaterialShaderBinding::loadUniforms() {
-    std::shared_ptr<VROShaderProgram> program = _program;
-    
-    _diffuseSurfaceColorUniform = program->getUniform("material_diffuse_surface_color");
-    _diffuseIntensityUniform = program->getUniform("material_diffuse_intensity");
-    _alphaUniform = program->getUniform("material_alpha");
-    _alphaCutoffUniform = program->getUniform("material_alpha_cutoff");
-    _shininessUniform = program->getUniform("material_shininess");
-    _roughnessUniform = program->getUniform("material_roughness");
-    _roughnessIntensityUniform = program->getUniform("material_roughness_intensity");
-    _metalnessUniform = program->getUniform("material_metalness");
-    _metalnessIntensityUniform = program->getUniform("material_metalness_intensity");
-    _aoUniform = program->getUniform("material_ao");
-    _emissiveColorUniform = program->getUniform("material_emissive_color");
-    
-    _normalMatrixUniform = program->getUniform("normal_matrix");
-    _modelMatrixUniform = program->getUniform("model_matrix");
-    _projectionMatrixUniform = program->getUniform("projection_matrix");
-    _viewMatrixUniform = program->getUniform("view_matrix");
-    _cameraPositionUniform = program->getUniform("camera_position");
-    _eyeTypeUniform = program->getUniform("eye_type");
+  std::shared_ptr<VROShaderProgram> program = _program;
 
-    // AR occlusion uniforms (may be null if occlusion not enabled)
-    _arCameraPositionUniform = program->getUniform("ar_camera_position");
-    _arViewportSizeUniform = program->getUniform("ar_viewport_size");
-    _arDepthTextureTransformUniform = program->getUniform("ar_depth_texture_transform");
-    _occlusionZNearUniform = program->getUniform("occlusion_z_near");
-    _occlusionZFarUniform = program->getUniform("occlusion_z_far");
-    
-    for (const std::shared_ptr<VROShaderModifier> &modifier : program->getModifiers()) {
-        std::vector<std::string> uniformNames = modifier->getUniforms();
-        
-        for (std::string &uniformName : uniformNames) {
-            VROUniformBinder *binder = modifier->getUniformBinder(uniformName);
-            VROUniform *uniform = _program->getUniform(binder->getName());
-            passert_msg (binder != nullptr, "Failed to find binder for uniform '%s' in program!",
-                         uniformName.c_str());
-            passert_msg (uniform != nullptr, "Failed to find uniform for modifier uniform '%s' in program!",
-                         uniformName.c_str());
-            _modifierUniformBinders.push_back({ binder, uniform });
-        }
+  _diffuseSurfaceColorUniform =
+      program->getUniform("material_diffuse_surface_color");
+  _diffuseIntensityUniform = program->getUniform("material_diffuse_intensity");
+  _alphaUniform = program->getUniform("material_alpha");
+  _alphaCutoffUniform = program->getUniform("material_alpha_cutoff");
+  _shininessUniform = program->getUniform("material_shininess");
+  _roughnessUniform = program->getUniform("material_roughness");
+  _roughnessIntensityUniform =
+      program->getUniform("material_roughness_intensity");
+  _metalnessUniform = program->getUniform("material_metalness");
+  _metalnessIntensityUniform =
+      program->getUniform("material_metalness_intensity");
+  _aoUniform = program->getUniform("material_ao");
+  _emissiveColorUniform = program->getUniform("material_emissive_color");
+
+  _normalMatrixUniform = program->getUniform("normal_matrix");
+  _modelMatrixUniform = program->getUniform("model_matrix");
+  _projectionMatrixUniform = program->getUniform("projection_matrix");
+  _viewMatrixUniform = program->getUniform("view_matrix");
+  _cameraPositionUniform = program->getUniform("camera_position");
+  _eyeTypeUniform = program->getUniform("eye_type");
+
+  // AR occlusion uniforms (may be null if occlusion not enabled)
+  _arCameraPositionUniform = program->getUniform("ar_camera_position");
+  _arViewportSizeUniform = program->getUniform("ar_viewport_size");
+  _arDepthTextureTransformUniform =
+      program->getUniform("ar_depth_texture_transform");
+  _occlusionZNearUniform = program->getUniform("occlusion_z_near");
+  _occlusionZFarUniform = program->getUniform("occlusion_z_far");
+
+  // Texture Transform Uniforms
+  _diffuseTextureOffsetUniform =
+      program->getUniform("material_diffuse_texture_offset");
+  _diffuseTextureRotationUniform =
+      program->getUniform("material_diffuse_texture_rotation");
+  _diffuseTextureScaleUniform =
+      program->getUniform("material_diffuse_texture_scale");
+
+  for (const std::shared_ptr<VROShaderModifier> &modifier :
+       program->getModifiers()) {
+    std::vector<std::string> uniformNames = modifier->getUniforms();
+
+    for (std::string &uniformName : uniformNames) {
+      VROUniformBinder *binder = modifier->getUniformBinder(uniformName);
+      VROUniform *uniform = _program->getUniform(binder->getName());
+      passert_msg(binder != nullptr,
+                  "Failed to find binder for uniform '%s' in program!",
+                  uniformName.c_str());
+      passert_msg(
+          uniform != nullptr,
+          "Failed to find uniform for modifier uniform '%s' in program!",
+          uniformName.c_str());
+      _modifierUniformBinders.push_back({binder, uniform});
     }
+  }
 }
 
 void VROMaterialShaderBinding::loadTextures() {
-    _textures.clear();
+  _textures.clear();
 
-    const std::vector<std::string> &samplers = _program->getSamplers();
+  const std::vector<std::string> &samplers = _program->getSamplers();
 
-    for (const std::string &sampler : samplers) {
-        if (sampler == "diffuse_texture" || sampler == "diffuse_texture_y" || sampler == "diffuse_texture_cbcr") {
-            // For YCbCr textures, both _y and _cbcr samplers use the same diffuse texture
-            // (the texture has multiple substrates for Y and CbCr planes)
-            _textures.emplace_back(_material.getDiffuse().getTexture());
-        }
-        else if (sampler == "specular_texture") {
-            _textures.emplace_back(_material.getSpecular().getTexture());
-        }
-        else if (sampler == "normal_texture") {
-            _textures.emplace_back(_material.getNormal().getTexture());
-        }
-        else if (sampler == "reflect_texture") {
-            _textures.emplace_back(_material.getReflective().getTexture());
-        }
-        else if (sampler == "roughness_map") {
-            _textures.emplace_back(_material.getRoughness().getTexture());
-        }
-        else if (sampler == "metalness_map") {
-            _textures.emplace_back(_material.getMetalness().getTexture());
-        }
-        else if (sampler == "ao_map") {
-            _textures.emplace_back(_material.getAmbientOcclusion().getTexture());
-        }
-        else if (sampler == "ar_depth_texture") {
-            // For camera background materials, depth texture is stored in ambient occlusion slot.
-            // For 3D object materials, we use the global AR depth texture from the render context.
-            std::shared_ptr<VROTexture> aoTexture = _material.getAmbientOcclusion().getTexture();
-            if (aoTexture) {
-                _textures.emplace_back(aoTexture);
-            } else {
-                _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
-            }
-        }
-        else if (sampler == "ar_occlusion_depth_texture") {
-            // For 3D object occlusion, always use the global AR depth texture.
-            // This avoids conflict with AO maps on the material.
-            _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
-        }
-        else if (sampler == "emissive_texture") {
-            _textures.emplace_back(_material.getEmission().getTexture());
-        }
-        else if (sampler == "shadow_map") {
-            _textures.emplace_back(VROGlobalTextureType::ShadowMap);
-        }
-        else if (sampler == "irradiance_map") {
-            _textures.emplace_back(VROGlobalTextureType::IrradianceMap);
-        }
-        else if (sampler == "prefiltered_map") {
-            _textures.emplace_back(VROGlobalTextureType::PrefilteredMap);
-        }
-        else if (sampler == "brdf_map") {
-            _textures.emplace_back(VROGlobalTextureType::BrdfMap);
-        }
-        else {
-            // Unhandled sampler - this will cause texture binding mismatch!
-            pwarn("loadTextures: Unhandled sampler '%s' - texture binding will be incorrect!", sampler.c_str());
-        }
+  for (const std::string &sampler : samplers) {
+    if (sampler == "diffuse_texture" || sampler == "diffuse_texture_y" ||
+        sampler == "diffuse_texture_cbcr") {
+      // For YCbCr textures, both _y and _cbcr samplers use the same diffuse
+      // texture (the texture has multiple substrates for Y and CbCr planes)
+      _textures.emplace_back(_material.getDiffuse().getTexture());
+    } else if (sampler == "specular_texture") {
+      _textures.emplace_back(_material.getSpecular().getTexture());
+    } else if (sampler == "normal_texture") {
+      _textures.emplace_back(_material.getNormal().getTexture());
+    } else if (sampler == "reflect_texture") {
+      _textures.emplace_back(_material.getReflective().getTexture());
+    } else if (sampler == "roughness_map") {
+      _textures.emplace_back(_material.getRoughness().getTexture());
+    } else if (sampler == "metalness_map") {
+      _textures.emplace_back(_material.getMetalness().getTexture());
+    } else if (sampler == "ao_map") {
+      _textures.emplace_back(_material.getAmbientOcclusion().getTexture());
+    } else if (sampler == "ar_depth_texture") {
+      // For camera background materials, depth texture is stored in ambient
+      // occlusion slot. For 3D object materials, we use the global AR depth
+      // texture from the render context.
+      std::shared_ptr<VROTexture> aoTexture =
+          _material.getAmbientOcclusion().getTexture();
+      if (aoTexture) {
+        _textures.emplace_back(aoTexture);
+      } else {
+        _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
+      }
+    } else if (sampler == "ar_occlusion_depth_texture") {
+      // For 3D object occlusion, always use the global AR depth texture.
+      // This avoids conflict with AO maps on the material.
+      _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
+    } else if (sampler == "emissive_texture") {
+      _textures.emplace_back(_material.getEmission().getTexture());
+    } else if (sampler == "shadow_map") {
+      _textures.emplace_back(VROGlobalTextureType::ShadowMap);
+    } else if (sampler == "irradiance_map") {
+      _textures.emplace_back(VROGlobalTextureType::IrradianceMap);
+    } else if (sampler == "prefiltered_map") {
+      _textures.emplace_back(VROGlobalTextureType::PrefilteredMap);
+    } else if (sampler == "brdf_map") {
+      _textures.emplace_back(VROGlobalTextureType::BrdfMap);
+    } else {
+      // Unhandled sampler - this will cause texture binding mismatch!
+      pwarn("loadTextures: Unhandled sampler '%s' - texture binding will be "
+            "incorrect!",
+            sampler.c_str());
     }
+  }
 }
 
-void VROMaterialShaderBinding::bindViewUniforms(VROMatrix4f &modelMatrix, VROMatrix4f &viewMatrix,
-                                                VROMatrix4f &projectionMatrix, VROMatrix4f &normalMatrix,
-                                                VROVector3f &cameraPosition, VROEyeType &eyeType) {
-    if (_normalMatrixUniform != nullptr) {
-        _normalMatrixUniform->setMat4(normalMatrix);
+void VROMaterialShaderBinding::bindViewUniforms(VROMatrix4f &modelMatrix,
+                                                VROMatrix4f &viewMatrix,
+                                                VROMatrix4f &projectionMatrix,
+                                                VROMatrix4f &normalMatrix,
+                                                VROVector3f &cameraPosition,
+                                                VROEyeType &eyeType) {
+  if (_normalMatrixUniform != nullptr) {
+    _normalMatrixUniform->setMat4(normalMatrix);
+  }
+  if (_modelMatrixUniform != nullptr) {
+    _modelMatrixUniform->setMat4(modelMatrix);
+  }
+  if (_projectionMatrixUniform != nullptr) {
+    _projectionMatrixUniform->setMat4(projectionMatrix);
+  }
+  if (_viewMatrixUniform != nullptr) {
+    _viewMatrixUniform->setMat4(viewMatrix);
+  }
+  if (_cameraPositionUniform != nullptr) {
+    _cameraPositionUniform->setVec3(cameraPosition);
+  }
+  if (_eyeTypeUniform != nullptr) {
+    if (eyeType == VROEyeType::Left || eyeType == VROEyeType::Monocular) {
+      _eyeTypeUniform->setFloat(0);
+    } else {
+      _eyeTypeUniform->setFloat(1.0);
     }
-    if (_modelMatrixUniform != nullptr) {
-        _modelMatrixUniform->setMat4(modelMatrix);
-    }
-    if (_projectionMatrixUniform != nullptr) {
-        _projectionMatrixUniform->setMat4(projectionMatrix);
-    }
-    if (_viewMatrixUniform != nullptr) {
-        _viewMatrixUniform->setMat4(viewMatrix);
-    }
-    if (_cameraPositionUniform != nullptr) {
-        _cameraPositionUniform->setVec3(cameraPosition);
-    }
-    if (_eyeTypeUniform != nullptr) {
-        if (eyeType == VROEyeType::Left || eyeType == VROEyeType::Monocular) {
-            _eyeTypeUniform->setFloat(0);
-        }
-        else {
-            _eyeTypeUniform->setFloat(1.0);
-        }
-    }
+  }
 }
 
-void VROMaterialShaderBinding::bindMaterialUniforms(const VROMaterial &material,
-                                                    std::shared_ptr<VRODriver> &driver) {
-    if (_diffuseSurfaceColorUniform != nullptr) {
-        VROVector4f color = material.getDiffuse().getColor();
-        if (driver->isLinearRenderingEnabled()) {
-            color = VROMathConvertSRGBToLinearColor(color);
-        }
-        _diffuseSurfaceColorUniform->setVec4(color);
+void VROMaterialShaderBinding::bindMaterialUniforms(
+    const VROMaterial &material, std::shared_ptr<VRODriver> &driver) {
+  if (_diffuseSurfaceColorUniform != nullptr) {
+    VROVector4f color = material.getDiffuse().getColor();
+    if (driver->isLinearRenderingEnabled()) {
+      color = VROMathConvertSRGBToLinearColor(color);
     }
-    if (_diffuseIntensityUniform != nullptr) {
-        _diffuseIntensityUniform->setFloat(material.getDiffuse().getIntensity());
+    _diffuseSurfaceColorUniform->setVec4(color);
+  }
+  if (_diffuseIntensityUniform != nullptr) {
+    _diffuseIntensityUniform->setFloat(material.getDiffuse().getIntensity());
+  }
+  if (_shininessUniform != nullptr) {
+    _shininessUniform->setFloat(material.getShininess());
+  }
+  if (_roughnessUniform != nullptr) {
+    _roughnessUniform->setFloat(material.getRoughness().getColor().x);
+  }
+  if (_roughnessIntensityUniform != nullptr) {
+    _roughnessIntensityUniform->setFloat(
+        material.getRoughness().getIntensity());
+  }
+  if (_metalnessUniform != nullptr) {
+    _metalnessUniform->setFloat(material.getMetalness().getColor().x);
+  }
+  if (_metalnessIntensityUniform != nullptr) {
+    _metalnessIntensityUniform->setFloat(
+        material.getMetalness().getIntensity());
+  }
+  if (_aoUniform != nullptr) {
+    _aoUniform->setFloat(material.getAmbientOcclusion().getColor().x);
+  }
+  if (_emissiveColorUniform != nullptr) {
+    VROVector4f emissiveColor = material.getEmission().getColor();
+    if (driver->isLinearRenderingEnabled()) {
+      emissiveColor = VROMathConvertSRGBToLinearColor(emissiveColor);
     }
-    if (_shininessUniform != nullptr) {
-        _shininessUniform->setFloat(material.getShininess());
+    _emissiveColorUniform->setVec3(
+        {emissiveColor.x, emissiveColor.y, emissiveColor.z});
+  }
+
+  // Bind Texture Transforms (using Diffuse Texture as source)
+  std::shared_ptr<VROTexture> diffuseTexture =
+      material.getDiffuse().getTexture();
+  if (diffuseTexture) {
+    VROTextureTransform transform = diffuseTexture->getTextureTransform();
+
+    if (_diffuseTextureOffsetUniform != nullptr) {
+      _diffuseTextureOffsetUniform->setVec2(transform.offset);
     }
-    if (_roughnessUniform != nullptr) {
-        _roughnessUniform->setFloat(material.getRoughness().getColor().x);
+    if (_diffuseTextureRotationUniform != nullptr) {
+      _diffuseTextureRotationUniform->setFloat(transform.rotation);
     }
-    if (_roughnessIntensityUniform != nullptr) {
-        _roughnessIntensityUniform->setFloat(material.getRoughness().getIntensity());
+    if (_diffuseTextureScaleUniform != nullptr) {
+      _diffuseTextureScaleUniform->setVec2(transform.scale);
     }
-    if (_metalnessUniform != nullptr) {
-        _metalnessUniform->setFloat(material.getMetalness().getColor().x);
+  } else {
+    // Default to identity if no texture
+    if (_diffuseTextureScaleUniform != nullptr) {
+      _diffuseTextureScaleUniform->setVec2({1.0, 1.0});
     }
-    if (_metalnessIntensityUniform != nullptr) {
-        _metalnessIntensityUniform->setFloat(material.getMetalness().getIntensity());
+    if (_diffuseTextureRotationUniform != nullptr) {
+      _diffuseTextureRotationUniform->setFloat(0.0);
     }
-    if (_aoUniform != nullptr) {
-        _aoUniform->setFloat(material.getAmbientOcclusion().getColor().x);
+    if (_diffuseTextureOffsetUniform != nullptr) {
+      _diffuseTextureOffsetUniform->setVec2({0.0, 0.0});
     }
-    if (_emissiveColorUniform != nullptr) {
-        VROVector4f emissiveColor = material.getEmission().getColor();
-        if (driver->isLinearRenderingEnabled()) {
-            emissiveColor = VROMathConvertSRGBToLinearColor(emissiveColor);
-        }
-        _emissiveColorUniform->setVec3({emissiveColor.x, emissiveColor.y, emissiveColor.z});
-    }
+  }
 }
 
-void VROMaterialShaderBinding::bindGeometryUniforms(float opacity, const VROGeometry &geometry, const VROMaterial &material) {
-    if (_alphaUniform != nullptr) {
-        _alphaUniform->setFloat(material.getTransparency() * opacity);
-    }
-    if (_alphaCutoffUniform != nullptr) {
-        _alphaCutoffUniform->setFloat(material.getAlphaCutoff());
-    }
-    for (auto binder_uniform : _modifierUniformBinders) {
-        binder_uniform.first->setForMaterial(binder_uniform.second, &geometry, &material);
-    }
+void VROMaterialShaderBinding::bindGeometryUniforms(
+    float opacity, const VROGeometry &geometry, const VROMaterial &material) {
+  if (_alphaUniform != nullptr) {
+    _alphaUniform->setFloat(material.getTransparency() * opacity);
+  }
+  if (_alphaCutoffUniform != nullptr) {
+    _alphaCutoffUniform->setFloat(material.getAlphaCutoff());
+  }
+  for (auto binder_uniform : _modifierUniformBinders) {
+    binder_uniform.first->setForMaterial(binder_uniform.second, &geometry,
+                                         &material);
+  }
 }
 
-void VROMaterialShaderBinding::bindOcclusionUniforms(const VRORenderContext &context) {
-    // Only bind if occlusion is enabled
-    if (!context.isOcclusionEnabled()) {
-        return;
-    }
+void VROMaterialShaderBinding::bindOcclusionUniforms(
+    const VRORenderContext &context) {
+  // Only bind if occlusion is enabled
+  if (!context.isOcclusionEnabled()) {
+    return;
+  }
 
-    if (_arCameraPositionUniform != nullptr) {
-        VROVector3f cameraPos = context.getCamera().getPosition();
-        _arCameraPositionUniform->setVec3(cameraPos);
-    }
-    if (_arViewportSizeUniform != nullptr) {
-        VROViewport viewport = context.getViewport();
-        _arViewportSizeUniform->setVec3({(float)viewport.getWidth(), (float)viewport.getHeight(), 0.0f});
-    }
-    if (_arDepthTextureTransformUniform != nullptr) {
-        VROMatrix4f depthTransform = context.getDepthTextureTransform();
-        _arDepthTextureTransformUniform->setMat4(depthTransform);
-    }
-    if (_occlusionZNearUniform != nullptr) {
-        _occlusionZNearUniform->setFloat(context.getZNear());
-    }
-    if (_occlusionZFarUniform != nullptr) {
-        _occlusionZFarUniform->setFloat(context.getZFar());
-    }
+  if (_arCameraPositionUniform != nullptr) {
+    VROVector3f cameraPos = context.getCamera().getPosition();
+    _arCameraPositionUniform->setVec3(cameraPos);
+  }
+  if (_arViewportSizeUniform != nullptr) {
+    VROViewport viewport = context.getViewport();
+    _arViewportSizeUniform->setVec3(
+        {(float)viewport.getWidth(), (float)viewport.getHeight(), 0.0f});
+  }
+  if (_arDepthTextureTransformUniform != nullptr) {
+    VROMatrix4f depthTransform = context.getDepthTextureTransform();
+    _arDepthTextureTransformUniform->setMat4(depthTransform);
+  }
+  if (_occlusionZNearUniform != nullptr) {
+    _occlusionZNearUniform->setFloat(context.getZNear());
+  }
+  if (_occlusionZFarUniform != nullptr) {
+    _occlusionZFarUniform->setFloat(context.getZFar());
+  }
 }
