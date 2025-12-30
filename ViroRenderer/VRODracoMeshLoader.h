@@ -1,9 +1,8 @@
 //
-//  VRODefines.h
+//  VRODracoMeshLoader.h
 //  ViroRenderer
 //
-//  Created by Raj Advani on 11/1/16.
-//  Copyright © 2016 Viro Media. All rights reserved.
+//  Copyright © 2018 Viro Media. All rights reserved.
 //
 //  Permission is hereby granted, free of charge, to any person obtaining
 //  a copy of this software and associated documentation files (the
@@ -24,45 +23,32 @@
 //  TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 //  SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#ifndef VRODefines_h
-#define VRODefines_h
+#ifndef VRODracoMeshLoader_h
+#define VRODracoMeshLoader_h
 
-#ifdef __OBJC__
-#import "TargetConditionals.h"
-#if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
-#define VRO_PLATFORM_ANDROID 0
-#define VRO_PLATFORM_IOS 1
-#define VRO_PLATFORM_WASM 0
-#define VRO_PLATFORM_MACOS 0
-#else
-#define VRO_PLATFORM_ANDROID 0
-#define VRO_PLATFORM_IOS 0
-#define VRO_PLATFORM_WASM 0
-#define VRO_PLATFORM_MACOS 1
-#endif // __OBJC__
-#else
-#ifdef WASM_PLATFORM
-#define VRO_PLATFORM_ANDROID 0
-#define VRO_PLATFORM_IOS 0
-#define VRO_PLATFORM_WASM 1
-#define VRO_PLATFORM_MACOS 0
+#include "VROGeometry.h"
+#include <memory>
+#include <vector>
 
-#define VRO_C_INCLUDE "VROWasmCAPI.h"
+namespace draco {
+class Mesh;
+class PointAttribute;
+} // namespace draco
 
-#else // !WASM_PLATFORM
-#define VRO_PLATFORM_ANDROID 1
-#define VRO_PLATFORM_IOS 0
-#define VRO_PLATFORM_WASM 0
-#define VRO_PLATFORM_MACOS 0
+class VRODracoMeshLoader {
+public:
+  static bool decodeDracoData(
+      const std::vector<char> &data,
+      const std::map<std::string, int> &attributeTypeMap,
+      std::vector<std::shared_ptr<VROGeometrySource>> &sourcesOut,
+      std::vector<std::shared_ptr<VROGeometryElement>> &elementsOut);
 
-#define VRO_C_INCLUDE "VROAndroidCAPI.h"
+private:
+  static void
+  processAttribute(const draco::Mesh *mesh,
+                   const draco::PointAttribute *attribute,
+                   VROGeometrySourceSemantic semantic,
+                   std::vector<std::shared_ptr<VROGeometrySource>> &sources);
+};
 
-#endif
-#endif // !__OBJC __
-
-#define VRO_METAL 0
-
-// True if building for Posemoji
-#define VRO_POSEMOJI 1
-
-#endif /* VRODefines_h */
+#endif /* VRODracoMeshLoader_h */

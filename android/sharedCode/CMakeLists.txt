@@ -6,6 +6,18 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftemplate-depth=1024")
 endif()
 
+# Draco configuration
+set(DRACO_TRANSCODER_SUPPORTED OFF CACHE BOOL "" FORCE)
+set(DRACO_ANIMATION_ENCODING OFF CACHE BOOL "" FORCE)
+set(DRACO_POINT_CLOUD_COMPRESSION ON CACHE BOOL "" FORCE)
+set(DRACO_MESH_COMPRESSION ON CACHE BOOL "" FORCE)
+set(DRACO_STANDARD_EDGEBREAKER ON CACHE BOOL "" FORCE)
+set(DRACO_PREDICTIVE_EDGEBREAKER ON CACHE BOOL "" FORCE)
+set(DRACO_BACKWARDS_COMPATIBILITY ON CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(${CMAKE_SOURCE_DIR}/../../ViroRenderer/draco ${CMAKE_BINARY_DIR}/draco_build)
+
 set(VIRO_ANDROID_INCLUDES ${CMAKE_SOURCE_DIR}/../libs)
 set(VIRO_ANDROID_LIBS     ${CMAKE_SOURCE_DIR}/../sharedCode/src/main/jniLibs)
 set(VIRO_RENDERER_SRC     ${CMAKE_SOURCE_DIR}/../../ViroRenderer)
@@ -22,7 +34,8 @@ include_directories(${VIRO_RENDERER_SRC}
                     ${VIRO_ANDROID_INCLUDES}/protobuf/include
                     ${VIRO_ANDROID_INCLUDES}/bullet/include
                     ${VIRO_ANDROID_INCLUDES}/opencv/include
-                    ${VIRO_ANDROID_INCLUDES}/arcore/include)
+                    ${VIRO_ANDROID_INCLUDES}/arcore/include
+                    ${VIRO_RENDERER_SRC}/draco/src)
 
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
@@ -148,6 +161,7 @@ add_library( # Sets the name of the library.
              ${VIRO_RENDERER_SRC}/VROGVRUtil.cpp
              ${VIRO_RENDERER_SRC}/VROThreadRestricted.cpp
              ${VIRO_RENDERER_SRC}/VROCompress.cpp
+             ${VIRO_RENDERER_SRC}/VRODracoMeshLoader.cpp
              ${VIRO_RENDERER_SRC}/VRORenderUtil.cpp
              ${VIRO_RENDERER_SRC}/VROTaskQueue.cpp
              ${VIRO_RENDERER_SRC}/VROSparseBitSet.cpp
@@ -469,5 +483,6 @@ target_link_libraries( # Specifies the target library.
 
                        cpufeatures
                        ${lib-z}
+                       draco_static
                        "-Wl,-z,max-page-size=16384"
         )

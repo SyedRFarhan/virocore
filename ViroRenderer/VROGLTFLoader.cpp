@@ -33,6 +33,7 @@
 #include "VROBox.h"
 #include "VROByteBuffer.h"
 #include "VROCompress.h"
+#include "VRODracoMeshLoader.h"
 #include "VROGeometry.h"
 #include "VROGeometryUtil.h"
 #include "VROKeyframeAnimation.h"
@@ -1821,12 +1822,56 @@ bool VROGLTFLoader::processMesh(const tinygltf::Model &gModel,
   // Cycle through them here.
   const std::vector<tinygltf::Primitive> &gPrimitives = gMesh.primitives;
   for (tinygltf::Primitive gPrimitive : gPrimitives) {
+    bool successVertex = false;
+    bool successAttributes = false;
 
     // Grab vertex indexing information needed for creating meshes.
-    bool successVertex = processVertexElement(gModel, gPrimitive, elements);
-    bool successAttributes = processVertexAttributes(
-        gModel, gPrimitive.attributes, sources, elements.size() - 1, driver);
-    processTangent(elements, sources, elements.size() - 1);
+    // Check for Draco compression at mesh level (extensions are on Mesh, not
+    // Primitive)
+    if (gMesh.extensions.find("KHR_draco_mesh_compression") !=
+        gMesh.extensions.end()) {
+      const tinygltf::Value &dracoExtension =
+          gMesh.extensions.at("KHR_draco_mesh_compression");
+      if (dracoExtension.Has("bufferView")) {
+        int bufferViewId = dracoExtension.Get("bufferView").Get<int>();
+        const tinygltf::BufferView &bufferView =
+            gModel.bufferViews[bufferViewId];
+        const tinygltf::Buffer &buffer = gModel.buffers[bufferView.buffer];
+
+        const unsigned char *dataStart =
+            buffer.data.data() + bufferView.byteOffset;
+        std::vector<char> data(dataStart, dataStart + bufferView.byteLength);
+
+        // Extract attribute mapping (Semantic -> Draco Unique ID)
+        std::map<std::string, int> attributeMap;
+        if (dracoExtension.Has("attributes")) {
+          const tinygltf::Value &attributesValue =
+              dracoExtension.Get("attributes");
+          if (attributesValue.IsObject()) {
+            const tinygltf::Value::Object &attributesObj =
+                attributesValue.Get<tinygltf::Value::Object>();
+            for (const auto &pair : attributesObj) {
+              attributeMap[pair.first] = pair.second.Get<int>();
+            }
+          }
+        }
+
+        if (VRODracoMeshLoader::decodeDracoData(data, attributeMap, sources,
+                                                elements)) {
+          successVertex = true;
+          successAttributes = true;
+          processTangent(elements, sources, elements.size() - 1);
+        } else {
+          pwarn("Failed to decode Draco mesh for primitive in mesh %s",
+                gMesh.name.c_str());
+        }
+      }
+    } else {
+      successVertex = processVertexElement(gModel, gPrimitive, elements);
+      successAttributes = processVertexAttributes(
+          gModel, gPrimitive.attributes, sources, elements.size() - 1, driver);
+      processTangent(elements, sources, elements.size() - 1);
+    }
 
     if (!successVertex || !successAttributes) {
       pwarn("Failed to process mesh %s.", gMesh.name.c_str());
