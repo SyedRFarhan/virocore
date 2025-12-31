@@ -35,7 +35,8 @@ include_directories(${VIRO_RENDERER_SRC}
                     ${VIRO_ANDROID_INCLUDES}/bullet/include
                     ${VIRO_ANDROID_INCLUDES}/opencv/include
                     ${VIRO_ANDROID_INCLUDES}/arcore/include
-                    ${VIRO_RENDERER_SRC}/draco/src)
+                    ${VIRO_RENDERER_SRC}/draco/src
+                    ${CMAKE_BINARY_DIR})
 
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
