@@ -529,6 +529,14 @@ static VROVector3f const kZeroVector = VROVector3f();
     return _arSession;
 }
 
+- (ARSession *)getNativeARSession {
+    std::shared_ptr<VROARSessioniOS> sessioniOS = std::dynamic_pointer_cast<VROARSessioniOS>(_arSession);
+    if (sessioniOS) {
+        return sessioniOS->getNativeARSession();
+    }
+    return nil;
+}
+
 #pragma mark - Settings and Notifications
 
 - (void)orientationDidChange:(NSNotification *)notification {
