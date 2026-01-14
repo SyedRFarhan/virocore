@@ -73,7 +73,7 @@
     std::shared_ptr<VRODriver> _driver;
     std::shared_ptr<VRORenderer> _renderer;
     std::shared_ptr<VROViewRecorderRTTDelegate> _rttDelegate;
-    __weak GLKView *_view;
+    GLKView *_view;  // Strong reference - cycle broken via clearView in deleteGL
     std::pair<int, int> _videoOutputDimensions;
 }
 
@@ -104,6 +104,8 @@
     if (_videoTextureCache) {
         _videoTextureCache.reset();
     }
+    // Break retain cycle with view
+    _view = nil;
 }
 
 #pragma mark - Start Recording
@@ -117,7 +119,7 @@
 - (void)startVideoRecording:(NSString *)fileName
            saveToCameraRoll:(BOOL)saveToCamera
                  errorBlock:(VROViewRecordingErrorBlock)errorBlock {
-    
+
     if (_isRecording) {
         NSLog(@"[Recording] Video is already being recorded, aborting...");
         if (errorBlock) {
@@ -449,14 +451,30 @@
 #pragma mark - Audio Recording
 
 - (NSURL *)startAudioRecordingInternal:(NSString *)fileName {
+    // Ensure audio session is properly configured and activated for recording
+    AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+    NSError *sessionError;
+
+    // Set category to allow recording with playback
+    if (![audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                       withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
+                             error:&sessionError]) {
+        NSLog(@"[Recording] Failed to set audio session category: %@", sessionError.localizedDescription);
+    }
+
+    // Activate the audio session
+    if (![audioSession setActive:YES error:&sessionError]) {
+        NSLog(@"[Recording] Failed to activate audio session: %@", sessionError.localizedDescription);
+    }
+
     NSDictionary *audioRecordSettings = @{
                                           AVFormatIDKey : @(kAudioFormatMPEG4AAC),
                                           AVSampleRateKey : @(16000), // 44.1k is CD (high) quality, we don't need that high, so 16kHz should be enough.
                                           AVNumberOfChannelsKey : @(1), // only 1 because 1 mic = mono sound
                                           };
-    
+
     NSURL *url = [self checkAndGetTempFileURL:[fileName stringByAppendingString:kVROViewAudioSuffix]];
-    
+
     NSError *error;
     _audioRecorder = [[AVAudioRecorder alloc] initWithURL:url settings:audioRecordSettings error:&error];
 
@@ -494,6 +512,10 @@
 - (void)startVideoRecordingInternal:(NSURL *)filePath {
     GLKView *view = _view;
     if (!view) {
+        // View was cleared (e.g., during cleanup) - report error instead of silent failure
+        if (_errorBlock) {
+            _errorBlock(kVROViewErrorUnknown);
+        }
         return;
     }
     

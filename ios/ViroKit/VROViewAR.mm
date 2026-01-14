@@ -491,6 +491,134 @@ static VROVector3f const kZeroVector = VROVector3f();
     [self.viewRecorder takeScreenshot:fileName saveToCameraRoll:saveToCamera withCompletionHandler:completionHandler];
 }
 
+- (void)takeHighResolutionPhoto:(NSString *)fileName
+               saveToCameraRoll:(BOOL)saveToCamera
+          withCompletionHandler:(VROViewWriteMediaFinishBlock)completionHandler {
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 160000
+    if (@available(iOS 16.0, *)) {
+        // Check permissions first if saving to camera roll
+        if (saveToCamera) {
+            PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+            if (status == PHAuthorizationStatusDenied || status == PHAuthorizationStatusRestricted) {
+                completionHandler(NO, nil, nil, kVROViewErrorNoPermissions);
+                return;
+            } else if (status == PHAuthorizationStatusNotDetermined) {
+                [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus newStatus) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self takeHighResolutionPhoto:fileName saveToCameraRoll:saveToCamera withCompletionHandler:completionHandler];
+                    });
+                }];
+                return;
+            }
+        }
+
+        // Get the AR session
+        std::shared_ptr<VROARSessioniOS> sessioniOS = std::dynamic_pointer_cast<VROARSessioniOS>(_arSession);
+        if (!sessioniOS) {
+            completionHandler(NO, nil, nil, 15); // Session not ready
+            return;
+        }
+
+        // Capture snapshot of 3D content now (before async capture)
+        UIImage *sceneSnapshot = self.snapshot;
+        if (!sceneSnapshot) {
+            completionHandler(NO, nil, nil, 12); // Render failed
+            return;
+        }
+
+        // Capture high-resolution frame
+        bool supported = sessioniOS->captureHighResolutionFrame([self, fileName, saveToCamera, completionHandler, sceneSnapshot](
+                CVPixelBufferRef image, VROMatrix4f cameraTransform, NSError *error) {
+            @autoreleasepool {
+                if (error || !image) {
+                    completionHandler(NO, nil, nil, 11); // Capture failed
+                    return;
+                }
+
+                // Get image dimensions
+                size_t width = CVPixelBufferGetWidth(image);
+                size_t height = CVPixelBufferGetHeight(image);
+
+                // Convert CVPixelBuffer to CIImage
+                CIImage *cameraImage = [CIImage imageWithCVPixelBuffer:image];
+
+                // Convert scene snapshot to CIImage and scale to match camera resolution
+                CIImage *sceneImage = [[CIImage alloc] initWithImage:sceneSnapshot];
+                CGFloat scaleX = (CGFloat)width / sceneSnapshot.size.width;
+                CGFloat scaleY = (CGFloat)height / sceneSnapshot.size.height;
+                sceneImage = [sceneImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+
+                // Composite: scene over camera (scene has alpha where there's no 3D content)
+                CIFilter *compositeFilter = [CIFilter filterWithName:@"CISourceOverCompositing"];
+                [compositeFilter setValue:sceneImage forKey:kCIInputImageKey];
+                [compositeFilter setValue:cameraImage forKey:kCIInputBackgroundImageKey];
+                CIImage *compositedImage = compositeFilter.outputImage;
+
+                if (!compositedImage) {
+                    completionHandler(NO, nil, nil, 12); // Render failed
+                    return;
+                }
+
+                // Create CIContext and render to CGImage
+                CIContext *context = [CIContext contextWithOptions:nil];
+                CGImageRef cgImage = [context createCGImage:compositedImage fromRect:CGRectMake(0, 0, width, height)];
+                if (!cgImage) {
+                    completionHandler(NO, nil, nil, 12); // Render failed
+                    return;
+                }
+
+                // Convert to UIImage and save as PNG
+                UIImage *finalImage = [UIImage imageWithCGImage:cgImage];
+                CGImageRelease(cgImage);
+
+                // Create file path
+                NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ViroMediaTemp"];
+                [[NSFileManager defaultManager] createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
+                NSString *fullFileName = [fileName stringByAppendingString:@".png"];
+                NSURL *filePath = [NSURL fileURLWithPath:[tempDir stringByAppendingPathComponent:fullFileName]];
+
+                // Remove existing file if present
+                [[NSFileManager defaultManager] removeItemAtURL:filePath error:nil];
+
+                // Write PNG
+                NSData *pngData = UIImagePNGRepresentation(finalImage);
+                BOOL written = [pngData writeToURL:filePath atomically:YES];
+                if (!written) {
+                    completionHandler(NO, nil, nil, kVROViewErrorWriteToFile);
+                    return;
+                }
+
+                // Save to camera roll if requested
+                if (saveToCamera) {
+                    [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+                        [[PHAssetCreationRequest creationRequestForAsset] addResourceWithType:PHAssetResourceTypePhoto
+                                                                                     fileURL:filePath
+                                                                                     options:nil];
+                    } completionHandler:^(BOOL success, NSError *saveError) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (success) {
+                                completionHandler(YES, filePath, nil, kVROViewErrorNone);
+                            } else {
+                                completionHandler(NO, filePath, nil, kVROViewErrorWriteToFile);
+                            }
+                        });
+                    }];
+                } else {
+                    completionHandler(YES, filePath, nil, kVROViewErrorNone);
+                }
+            }
+        });
+
+        if (!supported) {
+            completionHandler(NO, nil, nil, 10); // iOS version not supported
+        }
+        return;
+    }
+#endif
+    // iOS < 16 - not supported
+    completionHandler(NO, nil, nil, 10);
+}
+
 #pragma mark - AR Functions
 
 - (std::vector<std::shared_ptr<VROARHitTestResult>>)performARHitTest:(VROVector3f)ray {
@@ -731,6 +859,28 @@ static VROVector3f const kZeroVector = VROVector3f();
         mirrorX.scale(-1, 1, 1);
         backgroundTransform = mirrorX * backgroundTransform;
     }
+
+    // Apply render zoom to camera background texture coordinates
+    // This crops into the center of the camera feed to match the projection zoom
+    float renderZoom = _arSession->getRenderZoom();
+    if (renderZoom > 1.0f) {
+        // To zoom, we:
+        // 1. Scale texture coordinates by 1/zoom (crops to center portion)
+        // 2. Translate to center the crop
+        float scale = 1.0f / renderZoom;
+        float offset = (1.0f - scale) / 2.0f;
+
+        // Create the zoom transform: scale around center
+        // Transform order: translate to center -> scale -> translate back
+        VROMatrix4f zoomTransform;
+        zoomTransform[0] = scale;   // scale X
+        zoomTransform[5] = scale;   // scale Y
+        zoomTransform[12] = offset; // translate X to center
+        zoomTransform[13] = offset; // translate Y to center
+
+        backgroundTransform = zoomTransform * backgroundTransform;
+    }
+
     _cameraBackground->setTexcoordTransform(backgroundTransform);
 
     /*
@@ -764,6 +914,22 @@ static VROVector3f const kZeroVector = VROVector3f();
               withViewport:(VROViewport)viewport {
     VROFieldOfView fov;
     VROMatrix4f projection = camera->getProjection(viewport, kZNear, _renderer->getFarClippingPlane(), &fov);
+
+    // Apply render zoom to the projection matrix
+    // This narrows the effective FOV, creating a zoom effect
+    float renderZoom = _arSession->getRenderZoom();
+    if (renderZoom > 1.0f) {
+        // Scale the focal lengths (projection[0] = fx, projection[5] = fy)
+        // Higher focal length = narrower FOV = zoomed in
+        projection[0] *= renderZoom;
+        projection[5] *= renderZoom;
+
+        // Update FOV to reflect the zoom
+        float fovX = toDegrees(atan(1.0f / projection[0]) * 2.0);
+        float fovY = toDegrees(atan(1.0f / projection[5]) * 2.0);
+        fov = VROFieldOfView(fovX / 2.0, fovX / 2.0, fovY / 2.0, fovY / 2.0);
+    }
+
     VROMatrix4f rotation = camera->getRotation();
     VROVector3f position = camera->getPosition();
 

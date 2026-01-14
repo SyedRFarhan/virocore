@@ -54,6 +54,7 @@
 #import "VROCloudAnchorProviderARCore.h"
 #import "VROModelDownloader.h"
 #import <simd/simd.h>
+#import <AVFoundation/AVFoundation.h>
 
 #pragma mark - Lifecycle and Initialization
 
@@ -257,13 +258,29 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
       NSArray<ARVideoFormat *> *videoFormats =
           ARWorldTrackingConfiguration.supportedVideoFormats;
       int numberOfSupportedVideoFormats = (int)[videoFormats count];
+
+      pinfo("[ViroFormat] setVideoQuality called with quality=%s",
+            quality == VROVideoQuality::High ? "High" : "Low");
+      pinfo("[ViroFormat] Found %d supported video formats:", numberOfSupportedVideoFormats);
+
+      // Log all available formats
+      int formatIndex = 0;
+      for (ARVideoFormat *format in videoFormats) {
+        pinfo("[ViroFormat]   [%d] %dx%d @ %.0f FPS",
+              formatIndex,
+              (int)format.imageResolution.width,
+              (int)format.imageResolution.height,
+              format.framesPerSecond);
+        formatIndex++;
+      }
+
       // Since iOS 12, ARWorldTrackingConfiguration.supportedVideoFormats
       // started returning 0 //// supportedVideoFormats here, for simulator
       // targets. In that case, we'll skip the following and run session with
       // default videoformat value
       if (numberOfSupportedVideoFormats > 0) {
         if (quality == VROVideoQuality::High) {
-          ARVideoFormat *highestFormat;
+          ARVideoFormat *highestFormat = nil;
           float high = 0;
           for (ARVideoFormat *format in videoFormats) {
             if (format.imageResolution.height > high) {
@@ -271,10 +288,16 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
               highestFormat = format;
             }
           }
-          ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
-              highestFormat;
+          if (highestFormat) {
+            ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
+                highestFormat;
+            pinfo("[ViroFormat] SELECTED (High): %dx%d @ %.0f FPS",
+                  (int)highestFormat.imageResolution.width,
+                  (int)highestFormat.imageResolution.height,
+                  highestFormat.framesPerSecond);
+          }
         } else {
-          ARVideoFormat *lowestFormat;
+          ARVideoFormat *lowestFormat = nil;
           float low = CGFLOAT_MAX;
           for (ARVideoFormat *format in videoFormats) {
             if (format.imageResolution.height < low) {
@@ -282,14 +305,61 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
               lowestFormat = format;
             }
           }
-          ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
-              lowestFormat;
+          if (lowestFormat) {
+            ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
+                lowestFormat;
+            pinfo("[ViroFormat] SELECTED (Low): %dx%d @ %.0f FPS",
+                  (int)lowestFormat.imageResolution.width,
+                  (int)lowestFormat.imageResolution.height,
+                  lowestFormat.framesPerSecond);
+          }
         }
+      } else {
+        pinfo("[ViroFormat] No video formats available, using default");
       }
     }
     [_session runWithConfiguration:_sessionConfiguration];
   }
 #endif
+}
+
+bool VROARSessioniOS::captureHighResolutionFrame(
+    std::function<void(CVPixelBufferRef image, VROMatrix4f cameraTransform, NSError *error)> completion) {
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 160000
+  if (@available(iOS 16.0, *)) {
+    if (!_session || _sessionPaused) {
+      NSError *error = [NSError errorWithDomain:@"VROARSession"
+                                           code:15
+                                       userInfo:@{NSLocalizedDescriptionKey: @"AR session not ready"}];
+      completion(nil, VROMatrix4f::identity(), error);
+      return true;
+    }
+
+    [_session captureHighResolutionFrameWithCompletion:^(ARFrame * _Nullable frame, NSError * _Nullable error) {
+      if (error || !frame) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          completion(nil, VROMatrix4f::identity(), error);
+        });
+        return;
+      }
+
+      // Extract camera transform
+      simd_float4x4 transform = frame.camera.transform;
+      VROMatrix4f cameraTransform = VROConvert::toMatrix4f(transform);
+
+      // Get the high-resolution captured image
+      CVPixelBufferRef image = frame.capturedImage;
+      CVPixelBufferRetain(image);
+
+      dispatch_async(dispatch_get_main_queue(), ^{
+        completion(image, cameraTransform, nil);
+        CVPixelBufferRelease(image);
+      });
+    }];
+    return true;
+  }
+#endif
+  return false;
 }
 
 void VROARSessioniOS::setViewport(VROViewport viewport) {

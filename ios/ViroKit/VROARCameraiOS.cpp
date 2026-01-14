@@ -66,6 +66,10 @@ VROARTrackingStateReason VROARCameraiOS::getLimitedTrackingStateReason() const {
             return VROARTrackingStateReason::ExcessiveMotion;
         case ARTrackingStateReasonInsufficientFeatures:
             return VROARTrackingStateReason::InsufficientFeatures;
+        case ARTrackingStateReasonRelocalizing:
+            return VROARTrackingStateReason::Relocalizing;
+        case ARTrackingStateReasonInitializing:
+            return VROARTrackingStateReason::None;
         default:
             return VROARTrackingStateReason::None;
     }

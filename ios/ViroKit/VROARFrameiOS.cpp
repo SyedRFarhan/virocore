@@ -138,6 +138,29 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameiOS::hitTest(int x, i
      */
     VROMatrix4f viewportSpaceToCameraImageSpace = getViewportToCameraImageTransform();
     VROVector3f pointViewport(x / (float)_viewport.getWidth(), y / (float)_viewport.getHeight());
+
+    /*
+     Account for render zoom when converting viewport coordinates to camera image space.
+     When zoomed, the viewport shows a cropped portion of the camera image, so we need
+     to transform the touch point to the corresponding position in the full camera image.
+     */
+    std::shared_ptr<VROARSessioniOS> session = _session.lock();
+    if (session) {
+        float renderZoom = session->getRenderZoom();
+        if (renderZoom > 1.0f) {
+            // The zoomed viewport shows the center (1/zoom) portion of the camera image
+            // To find the camera image point, we scale up from center and offset
+            float scale = 1.0f / renderZoom;
+            float offset = (1.0f - scale) / 2.0f;
+
+            // Transform normalized viewport point to account for zoom crop
+            // The viewport center (0.5, 0.5) maps to camera center (0.5, 0.5)
+            // But viewport edge maps to the crop boundary, not camera edge
+            pointViewport.x = offset + pointViewport.x * scale;
+            pointViewport.y = offset + pointViewport.y * scale;
+        }
+    }
+
     VROVector3f pointCameraImage = viewportSpaceToCameraImageSpace.multiply(pointViewport);
     
     /*
@@ -149,8 +172,8 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameiOS::hitTest(int x, i
     
     /*
      Convert the results to VROARHitTestResult objects.
+     (Reuse the session pointer obtained above for zoom calculations)
      */
-    std::shared_ptr<VROARSessioniOS> session = _session.lock();
     std::vector<std::shared_ptr<VROARHitTestResult>> vResults;
     for (ARHitTestResult *result in results) {
         std::shared_ptr<VROARAnchor> vAnchor;
