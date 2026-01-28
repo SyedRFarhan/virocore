@@ -574,6 +574,80 @@ void VROARSessioniOS::hostCloudAnchor(
   }];
 }
 
+void VROARSessioniOS::hostCloudAnchorWithNativeAnchor(
+    ARAnchor *nativeAnchor,
+    int ttlDays,
+    std::function<void(std::shared_ptr<VROARAnchor>)> onSuccess,
+    std::function<void(std::string error)> onFailure) {
+
+  if (_cloudAnchorProvider != VROCloudAnchorProvider::ARCore) {
+    if (onFailure) {
+      onFailure("Cloud anchor provider not configured. Set cloudAnchorProvider='arcore' to enable.");
+    }
+    return;
+  }
+
+  if (_cloudAnchorProviderARCore == nil) {
+    if (onFailure) {
+      onFailure("ARCore Cloud Anchor provider not initialized. Ensure ARCore SDK is available.");
+    }
+    return;
+  }
+
+  if (!nativeAnchor) {
+    if (onFailure) {
+      onFailure("Native anchor is null.");
+    }
+    return;
+  }
+
+  // Validate TTL: ARCore supports 1-365 days
+  if (ttlDays < 1) {
+    ttlDays = 1;
+  } else if (ttlDays > 365) {
+    ttlDays = 365;
+  }
+
+  // Create a VROARAnchor wrapper for the native anchor
+  std::string anchorId = std::string([[nativeAnchor.identifier UUIDString] UTF8String]);
+  std::shared_ptr<VROARAnchor> anchor = std::make_shared<VROARAnchor>();
+  anchor->setId(anchorId);
+
+  // Extract transform from native anchor
+  simd_float4x4 nativeTransform = nativeAnchor.transform;
+  VROMatrix4f transform;
+  for (int i = 0; i < 4; i++) {
+    transform[i] = nativeTransform.columns[i][0];
+    transform[4 + i] = nativeTransform.columns[i][1];
+    transform[8 + i] = nativeTransform.columns[i][2];
+    transform[12 + i] = nativeTransform.columns[i][3];
+  }
+  anchor->setTransform(transform);
+
+  // Create weak reference to self for callback
+  std::weak_ptr<VROARSessioniOS> weakSelf = shared_from_this();
+  std::shared_ptr<VROARAnchor> anchorCopy = anchor;
+
+  [_cloudAnchorProviderARCore hostAnchor:nativeAnchor
+                                 ttlDays:ttlDays
+                               onSuccess:^(NSString *cloudAnchorId, ARAnchor *resolvedAnchor) {
+    auto strongSelf = weakSelf.lock();
+    if (!strongSelf) return;
+
+    // Update the anchor with the cloud anchor ID
+    anchorCopy->setCloudAnchorId(std::string([cloudAnchorId UTF8String]));
+
+    if (onSuccess) {
+      onSuccess(anchorCopy);
+    }
+  }
+                               onFailure:^(NSString *error) {
+    if (onFailure) {
+      onFailure(std::string([error UTF8String]));
+    }
+  }];
+}
+
 void VROARSessioniOS::resolveCloudAnchor(
     std::string cloudAnchorId,
     std::function<void(std::shared_ptr<VROARAnchor> anchor)> onSuccess,
@@ -1221,6 +1295,15 @@ void VROARSessioniOS::addAnchor(ARAnchor *anchor) {
   else {
     vAnchor = std::make_shared<VROARAnchor>();
   }
+
+  // Fallback: Ensure vAnchor is always set for plain ARAnchor objects.
+  // This handles the case where iOS version checks pass but anchor type
+  // doesn't match (e.g., manually created ARAnchor from addAnchorAtPosition).
+  // Without this, vAnchor would be null on iOS 11.3+ for non-plane/image/object anchors.
+  if (!vAnchor) {
+    vAnchor = std::make_shared<VROARAnchor>();
+  }
+
   vAnchor->setId(std::string([anchor.identifier.UUIDString UTF8String]));
 
   updateAnchorFromNative(vAnchor, anchor);
