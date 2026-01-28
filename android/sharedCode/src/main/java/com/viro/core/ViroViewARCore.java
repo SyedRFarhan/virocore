@@ -1154,6 +1154,82 @@ public class ViroViewARCore extends ViroView {
     }
 
     /**
+     * Set the render zoom factor. This applies a zoom effect by modifying the
+     * projection matrix and camera background texture coordinates. The zoom
+     * affects both the preview and any captured screenshots/videos.
+     *
+     * @param zoomFactor 1.0 = no zoom, 2.0 = 2x zoom, etc.
+     *                   Values are clamped to [1.0, maxRenderZoom]
+     */
+    public void setRenderZoom(float zoomFactor) {
+        if (!mDestroyed) {
+            ((RendererARCore) mNativeRenderer).setRenderZoom(zoomFactor);
+        }
+    }
+
+    /**
+     * Get the current render zoom factor.
+     *
+     * @return The current zoom factor (1.0 = no zoom)
+     */
+    public float getRenderZoom() {
+        if (!mDestroyed) {
+            return ((RendererARCore) mNativeRenderer).getRenderZoom();
+        }
+        return 1.0f;
+    }
+
+    /**
+     * Get the maximum supported render zoom factor.
+     *
+     * @return The maximum zoom factor
+     */
+    public float getMaxRenderZoom() {
+        if (!mDestroyed) {
+            return ((RendererARCore) mNativeRenderer).getMaxRenderZoom();
+        }
+        return 5.0f;
+    }
+
+    /**
+     * Set the maximum render zoom factor.
+     *
+     * @param maxZoom The maximum zoom factor (default 5.0)
+     */
+    public void setMaxRenderZoom(float maxZoom) {
+        if (!mDestroyed) {
+            ((RendererARCore) mNativeRenderer).setMaxRenderZoom(maxZoom);
+        }
+    }
+
+    /**
+     * Set the view zoom factor. This applies a zoom effect by scaling the view
+     * using Android's View transform system (setScaleX/setScaleY). Unlike render zoom,
+     * view zoom is NOT captured in screenshots or video recordings - it's a purely
+     * visual presentation effect.
+     *
+     * @param zoomFactor 1.0 = no zoom, 2.0 = 2x zoom, etc.
+     */
+    public void setViewZoom(float zoomFactor) {
+        if (!mDestroyed && mSurfaceView != null) {
+            mSurfaceView.setScaleX(zoomFactor);
+            mSurfaceView.setScaleY(zoomFactor);
+        }
+    }
+
+    /**
+     * Get the current view zoom factor.
+     *
+     * @return The current view zoom factor (1.0 = no zoom)
+     */
+    public float getViewZoom() {
+        if (!mDestroyed && mSurfaceView != null) {
+            return mSurfaceView.getScaleX();
+        }
+        return 1.0f;
+    }
+
+    /**
      * Listener interface for screenshot capture completion using PixelCopy.
      */
     public interface PixelCopyScreenshotListener {

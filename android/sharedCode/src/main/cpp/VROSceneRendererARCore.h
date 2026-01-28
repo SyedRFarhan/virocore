@@ -147,6 +147,17 @@ public:
      */
     void enableTracking(bool shouldTrack);
 
+    /*
+     Render zoom methods - delegate to the AR session.
+     Render zoom applies a zoom effect by modifying the projection matrix
+     and camera background texture coordinates. The zoom affects both the
+     preview and any captured screenshots/videos.
+     */
+    void setRenderZoom(float zoomFactor);
+    float getRenderZoom() const;
+    float getMaxRenderZoom() const;
+    void setMaxRenderZoom(float maxZoom);
+
 private:
 
     void renderFrame();

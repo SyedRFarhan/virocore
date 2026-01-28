@@ -171,6 +171,25 @@ void VROSceneRendererARCore::updateARBackground(std::unique_ptr<VROARFrame> &fra
     VROVector3f BL, BR, TL, TR;
     ((VROARFrameARCore *)frame.get())->getBackgroundTexcoords(&BL, &BR, &TL, &TR);
 
+    /*
+     Apply render zoom to camera background texture coordinates.
+     This crops into the center of the camera feed to match the projection zoom.
+     */
+    float renderZoom = _session->getRenderZoom();
+    if (renderZoom > 1.0f) {
+        // Scale texture coordinates by 1/zoom (crops to center portion)
+        // and translate to center the crop
+        float scale = 1.0f / renderZoom;
+        float offset = (1.0f - scale) / 2.0f;
+
+        // Apply zoom transform to each texture coordinate
+        // Transform: newCoord = offset + oldCoord * scale
+        BL = VROVector3f(offset + BL.x * scale, offset + BL.y * scale, BL.z);
+        BR = VROVector3f(offset + BR.x * scale, offset + BR.y * scale, BR.z);
+        TL = VROVector3f(offset + TL.x * scale, offset + TL.y * scale, TL.z);
+        TR = VROVector3f(offset + TR.x * scale, offset + TR.y * scale, TR.z);
+    }
+
     _cameraBackground->setTextureCoordinates(BL, BR, TL, TR);
 
     // Wait until we have these proper texture coordinates before installing the background
@@ -217,6 +236,24 @@ void VROSceneRendererARCore::renderWithTracking(const std::shared_ptr<VROARCamer
     VROMatrix4f projection = camera->getProjection(viewport, kZNear, _renderer->getFarClippingPlane(), &fov);
     VROMatrix4f rotation = camera->getRotation();
     VROVector3f position = camera->getPosition();
+
+    /*
+     Apply render zoom to the projection matrix.
+     This narrows the effective FOV, creating a zoom effect that is captured
+     in screenshots and video recordings.
+     */
+    float renderZoom = _session->getRenderZoom();
+    if (renderZoom > 1.0f) {
+        // Scale the focal lengths (projection[0] = fx, projection[5] = fy)
+        // Higher focal length = narrower FOV = zoomed in
+        projection[0] *= renderZoom;
+        projection[5] *= renderZoom;
+
+        // Update FOV to reflect the zoom
+        float fovX = (float)(atan(1.0f / projection[0]) * 2.0 * 180.0 / M_PI);
+        float fovY = (float)(atan(1.0f / projection[5]) * 2.0 * 180.0 / M_PI);
+        fov = VROFieldOfView(fovX / 2.0f, fovX / 2.0f, fovY / 2.0f, fovY / 2.0f);
+    }
 
     /*
      Set up occlusion depth texture if occlusion is enabled.
@@ -535,4 +572,28 @@ void VROSceneRendererARCore::enableTracking(bool shouldTrack) {
 
 }
 
+void VROSceneRendererARCore::setRenderZoom(float zoomFactor) {
+    if (_session) {
+        _session->setRenderZoom(zoomFactor);
+    }
+}
 
+float VROSceneRendererARCore::getRenderZoom() const {
+    if (_session) {
+        return _session->getRenderZoom();
+    }
+    return 1.0f;
+}
+
+float VROSceneRendererARCore::getMaxRenderZoom() const {
+    if (_session) {
+        return _session->getMaxRenderZoom();
+    }
+    return 5.0f;
+}
+
+void VROSceneRendererARCore::setMaxRenderZoom(float maxZoom) {
+    if (_session) {
+        _session->setMaxRenderZoom(maxZoom);
+    }
+}

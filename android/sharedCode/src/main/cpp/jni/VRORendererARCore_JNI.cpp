@@ -356,6 +356,47 @@ VRO_METHOD(VRO_BOOL, nativeisCameraAutoFocusEnabled) (VRO_ARGS
     return arRenderer->isCameraAutoFocusEnabled();
 }
 
+VRO_METHOD(void, nativeSetRenderZoom) (VRO_ARGS
+                                       jlong nativeRenderer,
+                                       jfloat zoomFactor) {
+    std::shared_ptr<VROSceneRenderer> renderer = Renderer::native(nativeRenderer);
+    std::weak_ptr<VROSceneRendererARCore> arRenderer_w = std::dynamic_pointer_cast<VROSceneRendererARCore>(renderer);
+
+    VROPlatformDispatchAsyncRenderer([arRenderer_w, zoomFactor]{
+        std::shared_ptr<VROSceneRendererARCore> arRenderer = arRenderer_w.lock();
+        if (arRenderer) {
+            arRenderer->setRenderZoom(zoomFactor);
+        }
+    });
+}
+
+VRO_METHOD(jfloat, nativeGetRenderZoom) (VRO_ARGS
+                                         jlong nativeRenderer) {
+    std::shared_ptr<VROSceneRenderer> renderer = Renderer::native(nativeRenderer);
+    std::shared_ptr<VROSceneRendererARCore> arRenderer = std::dynamic_pointer_cast<VROSceneRendererARCore>(renderer);
+    return arRenderer->getRenderZoom();
+}
+
+VRO_METHOD(jfloat, nativeGetMaxRenderZoom) (VRO_ARGS
+                                            jlong nativeRenderer) {
+    std::shared_ptr<VROSceneRenderer> renderer = Renderer::native(nativeRenderer);
+    std::shared_ptr<VROSceneRendererARCore> arRenderer = std::dynamic_pointer_cast<VROSceneRendererARCore>(renderer);
+    return arRenderer->getMaxRenderZoom();
+}
+
+VRO_METHOD(void, nativeSetMaxRenderZoom) (VRO_ARGS
+                                          jlong nativeRenderer,
+                                          jfloat maxZoom) {
+    std::shared_ptr<VROSceneRenderer> renderer = Renderer::native(nativeRenderer);
+    std::weak_ptr<VROSceneRendererARCore> arRenderer_w = std::dynamic_pointer_cast<VROSceneRendererARCore>(renderer);
+
+    VROPlatformDispatchAsyncRenderer([arRenderer_w, maxZoom]{
+        std::shared_ptr<VROSceneRendererARCore> arRenderer = arRenderer_w.lock();
+        if (arRenderer) {
+            arRenderer->setMaxRenderZoom(maxZoom);
+        }
+    });
+}
 
 }
 

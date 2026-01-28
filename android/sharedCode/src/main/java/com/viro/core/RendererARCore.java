@@ -102,6 +102,39 @@ public class RendererARCore extends Renderer {
         return nativeisCameraAutoFocusEnabled(mNativeRef);
     }
 
+    /**
+     * Set the render zoom factor. This applies a zoom effect by modifying the
+     * projection matrix and camera background texture coordinates. The zoom
+     * affects both the preview and any captured screenshots/videos.
+     *
+     * @param zoomFactor 1.0 = no zoom, 2.0 = 2x zoom, etc.
+     *                   Values are clamped to [1.0, maxRenderZoom]
+     */
+    public void setRenderZoom(float zoomFactor) {
+        nativeSetRenderZoom(mNativeRef, zoomFactor);
+    }
+
+    /**
+     * Get the current render zoom factor.
+     */
+    public float getRenderZoom() {
+        return nativeGetRenderZoom(mNativeRef);
+    }
+
+    /**
+     * Get the maximum supported render zoom factor.
+     */
+    public float getMaxRenderZoom() {
+        return nativeGetMaxRenderZoom(mNativeRef);
+    }
+
+    /**
+     * Set the maximum render zoom factor (default 5.0).
+     */
+    public void setMaxRenderZoom(float maxZoom) {
+        nativeSetMaxRenderZoom(mNativeRef, maxZoom);
+    }
+
     private native long nativeCreateRendererARCore(ClassLoader appClassLoader, Context context,
                                                    AssetManager assets, PlatformUtil platformUtil,
                                                    boolean enableShadows, boolean enableHDR, boolean enablePBR, boolean enableBloom);
@@ -118,4 +151,8 @@ public class RendererARCore extends Renderer {
     private native void nativeSetCameraImageListener(long nativeRenderer, long contextRef, CameraImageListener listener);
     private native void nativeSetCameraAutoFocusEnabled(long nativeRenderer, boolean enabled);
     private native boolean nativeisCameraAutoFocusEnabled(long nativeRenderer);
+    private native void nativeSetRenderZoom(long nativeRenderer, float zoomFactor);
+    private native float nativeGetRenderZoom(long nativeRenderer);
+    private native float nativeGetMaxRenderZoom(long nativeRenderer);
+    private native void nativeSetMaxRenderZoom(long nativeRenderer, float maxZoom);
 }
