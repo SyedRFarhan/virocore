@@ -936,10 +936,6 @@
 }
 
 // Geospatial stubs when ARCore is not available
-+ (BOOL)isGeospatialAvailable {
-    return NO;
-}
-
 - (BOOL)isGeospatialModeSupported {
     return NO;
 }

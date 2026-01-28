@@ -63,6 +63,7 @@ VROARSessioniOS::VROARSessioniOS(VROTrackingType trackingType,
                                  std::shared_ptr<VRODriver> driver)
     : VROARSession(trackingType, worldAlignment),
       _sessionPaused(true),
+      _capturedWorldMap(nil),
       _monocularDepthEnabled(false),
       _preferMonocularDepth(false),
       _monocularDepthModelURL(nil),
@@ -126,6 +127,9 @@ VROARSessioniOS::~VROARSessioniOS() {
     }
     _arKitReferenceObjectMap.clear();
 #endif
+
+    // Clear captured world map
+    _capturedWorldMap = nil;
 
     // Release ARKit objects
     _sessionConfiguration = nil;
@@ -1577,6 +1581,74 @@ float VROARSessioniOS::getSemanticLabelFraction(VROSemanticLabel label) const {
     return [_cloudAnchorProviderARCore getSemanticLabelFraction:(NSInteger)label];
   }
   return 0.0f;
+}
+
+#pragma mark - World Map Capture for Session Resume
+
+void VROARSessioniOS::captureWorldMapForResume() {
+    NSLog(@"[ViroAR] captureWorldMapForResume - session=%p, paused=%d", _session, _sessionPaused);
+    if (!_session || _sessionPaused) {
+        NSLog(@"[ViroAR] captureWorldMapForResume - skipping (no session or paused)");
+        return;
+    }
+
+    // Use __block variables to capture results without accessing `this` in the block.
+    // This prevents crashes if the block outlives the session object.
+    __block ARWorldMap *capturedMap = nil;
+    __block NSString *errorMessage = nil;
+    __block BOOL completionCalled = NO;
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+
+    NSLog(@"[ViroAR] Calling getCurrentWorldMapWithCompletionHandler...");
+    [_session getCurrentWorldMapWithCompletionHandler:^(ARWorldMap *worldMap, NSError *error) {
+        completionCalled = YES;
+        NSLog(@"[ViroAR] getCurrentWorldMap completion - worldMap=%p, error=%@",
+              worldMap, error ? [error localizedDescription] : @"none");
+        if (worldMap && !error) {
+            capturedMap = worldMap;
+        } else if (error) {
+            errorMessage = [error localizedDescription];
+        }
+        dispatch_semaphore_signal(semaphore);
+    }];
+
+    // Wait up to 3 seconds for world map capture.
+    // ARKit calls the completion handler on a serial queue (not main queue),
+    // so this should not deadlock.
+    NSLog(@"[ViroAR] Waiting for world map capture (3s timeout)...");
+    long result = dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    NSLog(@"[ViroAR] Semaphore wait returned: %ld (0=success, non-zero=timeout), completionCalled=%d",
+          result, completionCalled);
+
+    // Copy result to instance variable after semaphore wait completes
+    if (capturedMap) {
+        _capturedWorldMap = capturedMap;
+        NSLog(@"[ViroAR] World map captured successfully, _capturedWorldMap=%p", _capturedWorldMap);
+        pinfo("Captured world map for resume");
+    } else {
+        _capturedWorldMap = nil;
+        if (errorMessage) {
+            NSLog(@"[ViroAR] World map capture failed: %@", errorMessage);
+            pwarn("Failed to capture world map: %s", [errorMessage UTF8String]);
+        } else if (result != 0) {
+            NSLog(@"[ViroAR] World map capture timed out");
+        } else {
+            NSLog(@"[ViroAR] World map capture returned nil without error");
+        }
+    }
+}
+
+bool VROARSessioniOS::hasCapturedWorldMap() const {
+    return _capturedWorldMap != nil;
+}
+
+ARWorldMap *VROARSessioniOS::getCapturedWorldMap() const {
+    return _capturedWorldMap;
+}
+
+void VROARSessioniOS::clearCapturedWorldMap() {
+    _capturedWorldMap = nil;
 }
 
 #pragma mark - VROARKitSessionDelegate

@@ -675,13 +675,116 @@ static VROVector3f const kZeroVector = VROVector3f();
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification {
+    NSLog(@"[ViroAR] applicationWillResignActive - starting background transition");
     if (_displayLink) { _displayLink.paused = YES; }
-    if (_arSession) { _arSession->pause(); }
+    if (_arSession) {
+        // Capture world map before pausing (for resume with preserved anchors)
+        std::shared_ptr<VROARSessioniOS> sessioniOS =
+            std::dynamic_pointer_cast<VROARSessioniOS>(_arSession);
+        if (sessioniOS) {
+            NSLog(@"[ViroAR] Capturing world map before pause...");
+            sessioniOS->captureWorldMapForResume();
+            NSLog(@"[ViroAR] World map capture complete, hasCapturedWorldMap=%d",
+                  sessioniOS->hasCapturedWorldMap());
+        }
+        NSLog(@"[ViroAR] Pausing AR session");
+        _arSession->pause();
+    }
+    NSLog(@"[ViroAR] applicationWillResignActive - complete");
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
+    NSLog(@"[ViroAR] applicationDidBecomeActive - starting foreground transition");
     if (_displayLink) { _displayLink.paused = NO; }
-    if (_arSession) { _arSession->run(); }
+    if (_arSession) {
+        std::shared_ptr<VROARSessioniOS> sessioniOS =
+            std::dynamic_pointer_cast<VROARSessioniOS>(_arSession);
+
+        NSLog(@"[ViroAR] sessioniOS=%p, hasCapturedWorldMap=%d",
+              sessioniOS.get(),
+              sessioniOS ? sessioniOS->hasCapturedWorldMap() : -1);
+
+        if (sessioniOS && sessioniOS->hasCapturedWorldMap()) {
+            NSLog(@"[ViroAR] Attempting to restore with captured world map");
+            ARWorldMap *worldMap = sessioniOS->getCapturedWorldMap();
+            NSLog(@"[ViroAR] worldMap=%p", worldMap);
+
+            // Validate world map before using
+            if (worldMap == nil) {
+                NSLog(@"[ViroAR] World map is nil after getCapturedWorldMap - falling back to normal run");
+                sessioniOS->clearCapturedWorldMap();
+                _arSession->run();
+                return;
+            }
+
+            @try {
+                NSLog(@"[ViroAR] Creating new ARWorldTrackingConfiguration");
+                // Resume with captured world map to preserve anchor positions
+                ARWorldTrackingConfiguration *config = [[ARWorldTrackingConfiguration alloc] init];
+
+                // Copy settings from current configuration
+                ARConfiguration *currentConfig = sessioniOS->getSessionConfiguration();
+                NSLog(@"[ViroAR] currentConfig=%p, isWorldTracking=%d",
+                      currentConfig,
+                      currentConfig ? [currentConfig isKindOfClass:[ARWorldTrackingConfiguration class]] : -1);
+
+                if (currentConfig && [currentConfig isKindOfClass:[ARWorldTrackingConfiguration class]]) {
+                    ARWorldTrackingConfiguration *currentWorldConfig =
+                        (ARWorldTrackingConfiguration *)currentConfig;
+                    config.planeDetection = currentWorldConfig.planeDetection;
+                    config.environmentTexturing = currentWorldConfig.environmentTexturing;
+                    config.autoFocusEnabled = currentWorldConfig.autoFocusEnabled;
+                    config.lightEstimationEnabled = currentWorldConfig.lightEstimationEnabled;
+                    config.worldAlignment = currentWorldConfig.worldAlignment;
+
+                    // Copy detection sets if available
+                    if (@available(iOS 11.3, *)) {
+                        config.detectionImages = currentWorldConfig.detectionImages;
+                    }
+                    if (@available(iOS 12.0, *)) {
+                        config.detectionObjects = currentWorldConfig.detectionObjects;
+                    }
+
+                    // Copy iOS 13+ frame semantics and scene reconstruction
+                    if (@available(iOS 13.0, *)) {
+                        config.frameSemantics = currentWorldConfig.frameSemantics;
+                    }
+                    if (@available(iOS 13.4, *)) {
+                        config.sceneReconstruction = currentWorldConfig.sceneReconstruction;
+                    }
+                    NSLog(@"[ViroAR] Copied configuration settings from existing config");
+                } else {
+                    NSLog(@"[ViroAR] No existing config or not world tracking - using defaults");
+                }
+
+                NSLog(@"[ViroAR] Setting initialWorldMap and running session");
+                config.initialWorldMap = worldMap;
+                ARSession *nativeSession = sessioniOS->getNativeARSession();
+                NSLog(@"[ViroAR] nativeSession=%p", nativeSession);
+
+                [nativeSession runWithConfiguration:config
+                                            options:ARSessionRunOptionResetTracking];
+                NSLog(@"[ViroAR] Session started with world map successfully");
+
+                // Clear after use (will be recaptured on next background)
+                sessioniOS->clearCapturedWorldMap();
+                NSLog(@"[ViroAR] Cleared captured world map");
+            } @catch (NSException *exception) {
+                NSLog(@"[ViroAR] EXCEPTION during world map restore: %@ - %@",
+                      exception.name, exception.reason);
+                sessioniOS->clearCapturedWorldMap();
+                NSLog(@"[ViroAR] Falling back to normal run");
+                _arSession->run();
+            }
+        } else {
+            // Normal resume without world map
+            NSLog(@"[ViroAR] No captured world map - using normal resume");
+            _arSession->run();
+        }
+    } else {
+        NSLog(@"[ViroAR] No AR session - nothing to resume");
+    }
+    NSLog(@"[ViroAR] applicationDidBecomeActive - complete");
 }
 
 - (void)setRenderDelegate:(id<VRORenderDelegate>)renderDelegate {
