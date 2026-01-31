@@ -28,6 +28,7 @@
 #include "VROStringUtil.h"
 #include "VROLog.h"
 #include "VROARShadow.h"
+#include "VROShaderModifier.h"
 
 #if VRO_PLATFORM_ANDROID
 #define VRO_METHOD(return_type, method_name) \
@@ -502,6 +503,40 @@ VRO_METHOD(void, nativeSetColorWriteMask)(VRO_ARGS
             return;
         }
         material->setColorWriteMask(mask);
+    });
+}
+
+VRO_METHOD(void, nativeAddShaderModifier)(VRO_ARGS
+                                          VRO_REF(VROMaterial) material_j,
+                                          VRO_STRING entryPoint_j,
+                                          VRO_STRING_ARRAY codeLines_j) {
+    VRO_METHOD_PREAMBLE;
+    std::string entryPointStr = VRO_STRING_STL(entryPoint_j);
+
+    VROShaderEntryPoint entryPoint = VROShaderEntryPoint::Surface;
+    if (entryPointStr == "geometry")       entryPoint = VROShaderEntryPoint::Geometry;
+    else if (entryPointStr == "vertex")    entryPoint = VROShaderEntryPoint::Vertex;
+    else if (entryPointStr == "surface")   entryPoint = VROShaderEntryPoint::Surface;
+    else if (entryPointStr == "lighting")  entryPoint = VROShaderEntryPoint::LightingModel;
+    else if (entryPointStr == "fragment")  entryPoint = VROShaderEntryPoint::Fragment;
+
+    int numLines = VRO_ARRAY_LENGTH(codeLines_j);
+    std::vector<std::string> code;
+    for (int i = 0; i < numLines; i++) {
+        VRO_STRING line_j = VRO_STRING_ARRAY_GET(codeLines_j, i);
+        code.push_back(VRO_STRING_STL(line_j));
+    }
+
+    auto modifier = std::make_shared<VROShaderModifier>(entryPoint, code);
+    modifier->setName(entryPointStr + "_modifier");
+
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, modifier] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (!material) {
+            return;
+        }
+        material->addShaderModifier(modifier);
     });
 }
 

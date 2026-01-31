@@ -34,7 +34,10 @@ public class AnimationGroup extends ExecutableAnimation {
     public AnimationGroup(String positionX, String positionY, String positionZ,
                           String scaleX, String scaleY, String scaleZ,
                           String rotateX, String rotateY, String rotateZ,
-                          String opacity, String color, LazyMaterial lazyMaterial,
+                          String opacity, String color,
+                          String texcoordTranslateX, String texcoordTranslateY,
+                          String texcoordScaleX, String texcoordScaleY,
+                          LazyMaterial lazyMaterial,
                           float durationSeconds,
                           float delaySeconds, String functionType) {
 
@@ -47,7 +50,9 @@ public class AnimationGroup extends ExecutableAnimation {
         mNativeRef = nativeCreateAnimationGroup(positionX, positionY, positionZ,
                 scaleX, scaleY, scaleZ,
                 rotateX, rotateY, rotateZ,
-                opacity, color, lazyMaterialRef,
+                opacity, color,
+                texcoordTranslateX, texcoordTranslateY, texcoordScaleX, texcoordScaleY,
+                lazyMaterialRef,
                 durationSeconds, delaySeconds, functionType);
         mDurationSeconds = nativeGetDuration(mNativeRef);
     }
@@ -83,7 +88,10 @@ public class AnimationGroup extends ExecutableAnimation {
     private native long nativeCreateAnimationGroup(String positionX, String positionY, String positionZ,
                                                    String scaleX, String scaleY, String scaleZ,
                                                    String rotateX, String rotateY, String rotateZ,
-                                                   String opacity, String color, long lazyMaterialRef,
+                                                   String opacity, String color,
+                                                   String texcoordTranslateX, String texcoordTranslateY,
+                                                   String texcoordScaleX, String texcoordScaleY,
+                                                   long lazyMaterialRef,
                                                    float durationSeconds, float delaySeconds, String functionType);
     private native long nativeCopyAnimation(long nativeRef);
     private native void nativeDestroyAnimationGroup(long nativeRef);

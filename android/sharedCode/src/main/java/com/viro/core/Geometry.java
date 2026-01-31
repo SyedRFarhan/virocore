@@ -211,6 +211,17 @@ public class Geometry {
     }
 
     /**
+     * Set the per-vertex colors used by this Geometry. Each vertex gets an RGBA color value.
+     * The color data is a flat array of floats: [R, G, B, A, R, G, B, A, ...] with values
+     * in the range [0, 1].
+     *
+     * @param colors The RGBA color data as a flat float array (4 floats per vertex).
+     */
+    public void setVertexColors(float[] colors) {
+        nativeSetVertexColors(mNativeRef, colors);
+    }
+
+    /**
      * @hide
      * Create list of longs (refs) to all the materials. If any
      * material has already been destroyed, return false
@@ -236,6 +247,7 @@ public class Geometry {
     private native void nativeSetVertices(long nativeRef, float[] vertices);
     private native void nativeSetNormals(long nativeRef, float[] vertices);
     private native void nativeSetTextureCoordinates(long nativeRef, float[] vertices);
+    private native void nativeSetVertexColors(long nativeRef, float[] colors);
 
     /**
      * Retrieve a builder for creating {@link Geometry} objects.

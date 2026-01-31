@@ -57,7 +57,10 @@ VRO_METHOD(VRO_REF(VROAnimationGroup), nativeCreateAnimationGroup)(VRO_ARGS
                                                                    VRO_STRING positionX, VRO_STRING positionY, VRO_STRING positionZ,
                                                                    VRO_STRING scaleX, VRO_STRING scaleY, VRO_STRING scaleZ,
                                                                    VRO_STRING rotateX, VRO_STRING rotateY, VRO_STRING rotateZ,
-                                                                   VRO_STRING opacity, VRO_STRING color, VRO_REF(VROLazyMaterial) lazyMaterialRef,
+                                                                   VRO_STRING opacity, VRO_STRING color,
+                                                                   VRO_STRING texcoordTranslateX, VRO_STRING texcoordTranslateY,
+                                                                   VRO_STRING texcoordScaleX, VRO_STRING texcoordScaleY,
+                                                                   VRO_REF(VROLazyMaterial) lazyMaterialRef,
                                                                    VRO_FLOAT durationSeconds, VRO_FLOAT delaySeconds, VRO_STRING functionType) {
     VRO_METHOD_PREAMBLE;
     std::map<std::string, std::string> animationProperties;
@@ -75,6 +78,10 @@ VRO_METHOD(VRO_REF(VROAnimationGroup), nativeCreateAnimationGroup)(VRO_ARGS
     AddPropertyIfNotNull(env, "rotateZ", rotateZ, animationProperties);
     AddPropertyIfNotNull(env, "opacity", opacity, animationProperties);
     AddPropertyIfNotNull(env, "color", color, animationProperties);
+    AddPropertyIfNotNull(env, "texcoordTranslateX", texcoordTranslateX, animationProperties);
+    AddPropertyIfNotNull(env, "texcoordTranslateY", texcoordTranslateY, animationProperties);
+    AddPropertyIfNotNull(env, "texcoordScaleX", texcoordScaleX, animationProperties);
+    AddPropertyIfNotNull(env, "texcoordScaleY", texcoordScaleY, animationProperties);
 
     std::vector<std::shared_ptr<VROLazyMaterial>> materialAnimations;
     if (lazyMaterialRef != 0) {

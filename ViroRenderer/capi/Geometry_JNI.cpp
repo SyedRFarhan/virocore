@@ -197,4 +197,31 @@ VRO_METHOD(void, nativeSetTextureCoordinates)(VRO_ARGS
     VRO_FLOAT_ARRAY_RELEASE_ELEMENTS(texCoords_j, texcoords_c);
 }
 
+VRO_METHOD(void, nativeSetVertexColors)(VRO_ARGS
+                                        VRO_REF(VROGeometry) nativeRef,
+                                        VRO_FLOAT_ARRAY colors_j) {
+    float *colors_c = VRO_FLOAT_ARRAY_GET_ELEMENTS(colors_j);
+    int len = VRO_ARRAY_LENGTH(colors_j);
+
+    int numColors = len / 4;
+    std::shared_ptr<VROData> colorData = std::make_shared<VROData>((void *) colors_c, len * sizeof(float));
+
+    std::weak_ptr<VROGeometry> geo_w = VRO_REF_GET(VROGeometry, nativeRef);
+    VROPlatformDispatchAsyncRenderer([geo_w, colorData, numColors] {
+        std::shared_ptr<VROGeometry> geo = geo_w.lock();
+        if (geo) {
+            std::shared_ptr<VROGeometrySource> color = std::make_shared<VROGeometrySource>(
+                colorData,
+                VROGeometrySourceSemantic::Color,
+                numColors,
+                true, 4,
+                sizeof(float),
+                0,
+                sizeof(float) * 4);
+            geo->setGeometrySourceForSemantic(VROGeometrySourceSemantic::Color, color);
+        }
+    });
+    VRO_FLOAT_ARRAY_RELEASE_ELEMENTS(colors_j, colors_c);
+}
+
 }

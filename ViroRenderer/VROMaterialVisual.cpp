@@ -101,3 +101,9 @@ void VROMaterialVisual::setIntensity(float intensity) {
     _intensity = intensity;
     _material.updateSubstrate();
 }
+
+void VROMaterialVisual::setContentsTransform(VROMatrix4f transform) {
+    _material.fadeSnapshot();
+    _contentsTransform = transform;
+    _material.updateSubstrate();
+}

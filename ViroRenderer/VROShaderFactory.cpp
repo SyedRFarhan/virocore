@@ -1390,3 +1390,121 @@ std::shared_ptr<VROShaderModifier> VROShaderFactory::createDepthDebugModifier() 
 
     return modifier;
 }
+
+std::shared_ptr<VROShaderModifier> VROShaderFactory::createScanWaveModifier() {
+    /*
+     Vision Pro "luminous pearl" scan wave effect.
+
+     A two-zone wavefront (bright core + soft trailing halo) sweeps near → far
+     through the AR depth map. Depth-discontinuity edges receive a soft rim glow.
+     Hash-based noise adds subtle shimmer confined to the wavefront zone.
+     Additive blending creates a luminous over-bright feel; Reinhard tonemapping
+     prevents blown-out posterization on bright camera-feed surfaces.
+
+     All parameters driven by uniform binders set by VROViewAR.
+
+     NOTE: Runs at Surface entry point AFTER YCbCr conversion,
+     so _surface.diffuse_color already contains the camera RGB image.
+     */
+    std::vector<std::string> modifierCode = {
+        // --- Infrastructure uniforms (depth texture + coordinate mapping) ---
+        "uniform sampler2D ar_depth_texture;",
+        "// @sampler ar_depth_texture",
+        "uniform highp vec3 ar_viewport_size;",
+        "uniform highp mat4 ar_depth_texture_transform;",
+
+        // --- Timing ---
+        "uniform highp float scan_wave_time;",
+        "uniform highp float scan_sweep_duration;",
+        "uniform highp float scan_fade_duration;",
+        "uniform highp float scan_max_depth;",
+
+        // --- Core wavefront ---
+        "uniform highp float scan_core_band_width;",
+        "uniform highp float scan_core_intensity;",
+        "uniform highp vec3  scan_core_color;",
+
+        // --- Halo ---
+        "uniform highp float scan_halo_width;",
+        "uniform highp float scan_halo_intensity;",
+        "uniform highp vec3  scan_halo_color;",
+
+        // --- Rim glow ---
+        "uniform highp vec3  scan_rim_color;",
+        "uniform highp float scan_rim_intensity;",
+        "uniform highp float scan_rim_power;",
+        "uniform highp float scan_edge_threshold;",
+
+        // --- Noise ---
+        "uniform highp vec3  scan_noise_tint;",
+        "uniform highp float scan_noise_intensity;",
+        "uniform highp float scan_noise_scale;",
+        "uniform highp float scan_noise_speed;",
+
+        // 1. Screen UV → depth UV
+        "highp vec2 sw_screenUV = gl_FragCoord.xy / ar_viewport_size.xy;",
+        "sw_screenUV.y = 1.0 - sw_screenUV.y;",
+        "highp vec2 sw_depthUV = (ar_depth_texture_transform * vec4(sw_screenUV, 0.0, 1.0)).xy;",
+        "sw_depthUV = clamp(sw_depthUV, 0.0, 1.0);",
+
+        // 2. Sample center depth + 4 neighbors (cross pattern)
+        "highp float sw_depth = texture(ar_depth_texture, sw_depthUV).r;",
+        "highp vec2 sw_texelSize = vec2(1.0) / ar_viewport_size.xy;",
+        "highp float sw_dL = texture(ar_depth_texture, (ar_depth_texture_transform * vec4(sw_screenUV + vec2(-sw_texelSize.x, 0.0), 0.0, 1.0)).xy).r;",
+        "highp float sw_dR = texture(ar_depth_texture, (ar_depth_texture_transform * vec4(sw_screenUV + vec2( sw_texelSize.x, 0.0), 0.0, 1.0)).xy).r;",
+        "highp float sw_dU = texture(ar_depth_texture, (ar_depth_texture_transform * vec4(sw_screenUV + vec2(0.0, -sw_texelSize.y), 0.0, 1.0)).xy).r;",
+        "highp float sw_dD = texture(ar_depth_texture, (ar_depth_texture_transform * vec4(sw_screenUV + vec2(0.0,  sw_texelSize.y), 0.0, 1.0)).xy).r;",
+
+        // 3. Depth gradient — normalized by depth to suppress far-range noise
+        "highp float sw_gradient = abs(sw_dR - sw_dL) + abs(sw_dD - sw_dU);",
+        "highp float sw_gradientNorm = sw_gradient / max(sw_depth, 0.75);",
+
+        // 4. Soft rim glow — pow(smoothstep, 1/n) widens the glow around depth edges
+        "highp float sw_rimBase = smoothstep(scan_edge_threshold, scan_edge_threshold * 4.0, sw_gradientNorm);",
+        "highp float sw_rimGlow = pow(sw_rimBase, 1.0 / scan_rim_power);",
+
+        // 5. Wave progress
+        "highp float sw_progress = clamp(scan_wave_time / scan_sweep_duration, 0.0, 1.0);",
+        "highp float sw_scanDist = sw_progress * scan_max_depth;",
+
+        // 6. Two-zone wavefront
+        "highp float sw_coreBand = 1.0 - smoothstep(0.0, scan_core_band_width, abs(sw_depth - sw_scanDist));",
+        "highp float sw_haloBand = 1.0 - smoothstep(0.0, scan_halo_width, max(0.0, sw_scanDist - sw_depth));",
+        "sw_haloBand *= sw_haloBand;",                      // quadratic falloff
+        "sw_haloBand *= (1.0 - sw_coreBand);",              // exclude core from halo
+
+        // 7. Behind-wave mask (for rim glow — only show on surfaces the wave has passed)
+        "highp float sw_behindWave = 1.0 - smoothstep(sw_scanDist - scan_core_band_width, sw_scanDist, sw_depth);",
+
+        // 8. Hash noise confined to wavefront
+        "highp float sw_noise = fract(sin(dot(sw_screenUV * scan_noise_scale + scan_wave_time * scan_noise_speed, vec2(12.9898, 78.233))) * 43758.5453);",
+        "highp float sw_wavefrontMask = sw_coreBand + sw_haloBand * 0.5;",
+        "highp vec3 sw_noiseContrib = scan_noise_tint * sw_noise * scan_noise_intensity * sw_wavefrontMask;",
+
+        // 9. Global fade
+        "highp float sw_fade = 1.0 - smoothstep(scan_sweep_duration, scan_sweep_duration + scan_fade_duration, scan_wave_time);",
+
+        // 10. Combine (additive + soft tonemap)
+        "highp vec3 sw_coreContrib  = scan_core_color * sw_coreBand * scan_core_intensity;",
+        "highp vec3 sw_haloContrib  = scan_halo_color * sw_haloBand * scan_halo_intensity;",
+        "highp vec3 sw_rimContrib   = scan_rim_color  * sw_rimGlow  * scan_rim_intensity * sw_behindWave;",
+        "highp vec3 sw_totalAdd     = (sw_coreContrib + sw_haloContrib + sw_rimContrib + sw_noiseContrib) * sw_fade;",
+
+        // Skip pixels with no depth data
+        "if (sw_depth > 0.001) {",
+        "    _surface.diffuse_color.rgb += sw_totalAdd;",   // additive blending
+
+        // Reinhard tonemap — prevents blown-out posterization on bright surfaces
+        // Only applied when effect contributes; camera passthrough unaffected
+        "    if (sw_totalAdd.r + sw_totalAdd.g + sw_totalAdd.b > 0.001) {",
+        "        _surface.diffuse_color.rgb = _surface.diffuse_color.rgb / (_surface.diffuse_color.rgb + vec3(1.0));",
+        "    }",
+        "}"
+    };
+
+    std::shared_ptr<VROShaderModifier> modifier = std::make_shared<VROShaderModifier>(
+        VROShaderEntryPoint::Surface, modifierCode);
+    modifier->setName("scan_wave");
+
+    return modifier;
+}

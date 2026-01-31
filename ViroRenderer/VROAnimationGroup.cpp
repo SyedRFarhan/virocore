@@ -98,6 +98,7 @@ void VROAnimationGroup::execute(std::shared_ptr<VRONode> node,
     animateOpacity(node);
     animateScale(node);
     animateRotation(node);
+    animateTexcoordTransform(node);
 
     std::weak_ptr<VROAnimationGroup> weakSelf = shared_from_this();
     VROTransaction::setFinishCallback([weakSelf, onFinished](bool terminate){
@@ -267,6 +268,50 @@ void VROAnimationGroup::animateRotation(std::shared_ptr<VRONode> &node) {
     if (rotateZ_it != _propertyAnimations.end()) {
         std::shared_ptr<VROPropertyAnimation> &a = rotateZ_it->second;
         node->setRotationEulerZ(a->processOp(rotateZ));
+    }
+}
+
+void VROAnimationGroup::animateTexcoordTransform(std::shared_ptr<VRONode> &node) {
+    auto txX_it = _propertyAnimations.find("texcoordTranslateX");
+    auto txY_it = _propertyAnimations.find("texcoordTranslateY");
+    auto scX_it = _propertyAnimations.find("texcoordScaleX");
+    auto scY_it = _propertyAnimations.find("texcoordScaleY");
+
+    if (txX_it == _propertyAnimations.end() && txY_it == _propertyAnimations.end() &&
+        scX_it == _propertyAnimations.end() && scY_it == _propertyAnimations.end()) {
+        return;
+    }
+    if (!node->getGeometry()) {
+        return;
+    }
+
+    for (const auto &material : node->getGeometry()->getMaterials()) {
+        VROMatrix4f current = material->getDiffuse().getContentsTransform();
+        // Extract current translate/scale from the matrix
+        float translateX = current[12]; // m[3][0]
+        float translateY = current[13]; // m[3][1]
+        float scaleX = current[0];      // m[0][0]
+        float scaleY = current[5];      // m[1][1]
+
+        if (txX_it != _propertyAnimations.end()) {
+            translateX = txX_it->second->processOp(translateX);
+        }
+        if (txY_it != _propertyAnimations.end()) {
+            translateY = txY_it->second->processOp(translateY);
+        }
+        if (scX_it != _propertyAnimations.end()) {
+            scaleX = scX_it->second->processOp(scaleX);
+        }
+        if (scY_it != _propertyAnimations.end()) {
+            scaleY = scY_it->second->processOp(scaleY);
+        }
+
+        VROMatrix4f newTransform;
+        newTransform[0] = scaleX;
+        newTransform[5] = scaleY;
+        newTransform[12] = translateX;
+        newTransform[13] = translateY;
+        material->getDiffuse().setContentsTransform(newTransform);
     }
 }
 

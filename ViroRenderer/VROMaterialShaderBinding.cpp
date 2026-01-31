@@ -45,6 +45,7 @@ VROMaterialShaderBinding::VROMaterialShaderBinding(std::shared_ptr<VROShaderProg
     lightingShaderCapabilities(capabilities),
     _diffuseSurfaceColorUniform(nullptr),
     _diffuseIntensityUniform(nullptr),
+    _diffuseContentsTransformUniform(nullptr),
     _alphaUniform(nullptr),
     _alphaCutoffUniform(nullptr),
     _shininessUniform(nullptr),
@@ -74,6 +75,7 @@ void VROMaterialShaderBinding::loadUniforms() {
     
     _diffuseSurfaceColorUniform = program->getUniform("material_diffuse_surface_color");
     _diffuseIntensityUniform = program->getUniform("material_diffuse_intensity");
+    _diffuseContentsTransformUniform = program->getUniform("material_diffuse_contents_transform");
     _alphaUniform = program->getUniform("material_alpha");
     _alphaCutoffUniform = program->getUniform("material_alpha_cutoff");
     _shininessUniform = program->getUniform("material_shininess");
@@ -218,6 +220,9 @@ void VROMaterialShaderBinding::bindMaterialUniforms(const VROMaterial &material,
     }
     if (_diffuseIntensityUniform != nullptr) {
         _diffuseIntensityUniform->setFloat(material.getDiffuse().getIntensity());
+    }
+    if (_diffuseContentsTransformUniform != nullptr) {
+        _diffuseContentsTransformUniform->setMat4(material.getDiffuse().getContentsTransform());
     }
     if (_shininessUniform != nullptr) {
         _shininessUniform->setFloat(material.getShininess());

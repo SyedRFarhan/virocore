@@ -750,6 +750,7 @@
 		8FE382121EF06FED005038CB /* VROARCamera.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1F06591EF06FBB006FC8C2 /* VROARCamera.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8FE382131EF06FED005038CB /* VROARAnchor.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1F06581EF06FBB006FC8C2 /* VROARAnchor.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8FE382141EF06FED005038CB /* VROARPlaneAnchor.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1F065C1EF06FBB006FC8C2 /* VROARPlaneAnchor.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		A1B2C3D400000001000MESH0 /* VROARMeshAnchor.h in Headers */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000002000MESH0 /* VROARMeshAnchor.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8FE382151EF06FED005038CB /* VROARHitTestResult.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1F065B1EF06FBB006FC8C2 /* VROARHitTestResult.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8FE39F7F201FB2C70088A175 /* VROPhotometricLightTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 8FE39F7D201FB2C60088A175 /* VROPhotometricLightTest.cpp */; };
 		8FE39F80201FB2D70088A175 /* VROPhotometricLightTest.h in Headers */ = {isa = PBXBuildFile; fileRef = 8FE39F7E201FB2C70088A175 /* VROPhotometricLightTest.h */; };
@@ -1151,6 +1152,7 @@
 		8F1F065A1EF06FBB006FC8C2 /* VROARFrame.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = VROARFrame.h; sourceTree = "<group>"; };
 		8F1F065B1EF06FBB006FC8C2 /* VROARHitTestResult.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = VROARHitTestResult.h; sourceTree = "<group>"; };
 		8F1F065C1EF06FBB006FC8C2 /* VROARPlaneAnchor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = VROARPlaneAnchor.h; sourceTree = "<group>"; };
+		A1B2C3D400000002000MESH0 /* VROARMeshAnchor.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = VROARMeshAnchor.h; sourceTree = "<group>"; };
 		8F1F065D1EF06FBB006FC8C2 /* VROARSession.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = VROARSession.h; sourceTree = "<group>"; };
 		8F201C4D21010E0B00637A75 /* VROPolygonTest.cpp */ = {isa = PBXFileReference; explicitFileType = sourcecode.cpp.objcpp; path = VROPolygonTest.cpp; sourceTree = "<group>"; };
 		8F201C4E21010E0B00637A75 /* VROPolygonTest.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROPolygonTest.h; sourceTree = "<group>"; };
@@ -2239,6 +2241,7 @@
 				8AE44C972021317A00CE8394 /* VROARImageAnchor.h */,
 				8AB5B73A211B72120030906A /* VROARObjectAnchor.h */,
 				8F1F065C1EF06FBB006FC8C2 /* VROARPlaneAnchor.h */,
+				A1B2C3D400000002000MESH0 /* VROARMeshAnchor.h */,
 				8F1F065B1EF06FBB006FC8C2 /* VROARHitTestResult.h */,
 				8A5C05581EF6416900F94CB9 /* VROARNode.h */,
 				8A4590FA1F97BF4D00D3811A /* VROARNode.cpp */,
@@ -3361,6 +3364,7 @@
 				8AD76EA6211B7BF10045BD5F /* VROARObjectTargetiOS.h in Headers */,
 				8FB2B58C1E143F7900EDB629 /* optional.hpp in Headers */,
 				8FE382141EF06FED005038CB /* VROARPlaneAnchor.h in Headers */,
+				A1B2C3D400000001000MESH0 /* VROARMeshAnchor.h in Headers */,
 				8F2D1BB01EC288F700E7BF44 /* VROSkinner.h in Headers */,
 				A5EC65B71EBFF5A100FE220E /* VROPhysicsBody.h in Headers */,
 				8F9209151F3CAF72003305C8 /* VROImageShaderProgram.h in Headers */,

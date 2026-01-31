@@ -31,6 +31,7 @@
 #include "VROARFrameiOS.h"
 #include "VROARImageAnchor.h"
 #include "VROARImageTargetiOS.h"
+#include "VROARMeshAnchor.h"
 #include "VROARObjectAnchor.h"
 #include "VROARObjectTargetiOS.h"
 #include "VROARPlaneAnchor.h"
@@ -429,6 +430,27 @@ bool VROARSessioniOS::setAnchorDetection(std::set<VROAnchorDetection> types) {
 #endif
       ((ARWorldTrackingConfiguration *)_sessionConfiguration).planeDetection =
           detectionTypes;
+
+      // Enable scene reconstruction (mesh) if requested (iOS 13.4+, LiDAR)
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 134000
+      if (@available(iOS 13.4, *)) {
+        ARWorldTrackingConfiguration *worldConfig =
+            (ARWorldTrackingConfiguration *)_sessionConfiguration;
+        if (types.find(VROAnchorDetection::Mesh) != types.end()) {
+          if ([ARWorldTrackingConfiguration supportsSceneReconstruction:ARSceneReconstructionMeshWithClassification]) {
+            worldConfig.sceneReconstruction = ARSceneReconstructionMeshWithClassification;
+            pinfo("ARMeshAnchor: Scene reconstruction enabled (mesh with classification)");
+          } else if ([ARWorldTrackingConfiguration supportsSceneReconstruction:ARSceneReconstructionMesh]) {
+            worldConfig.sceneReconstruction = ARSceneReconstructionMesh;
+            pinfo("ARMeshAnchor: Scene reconstruction enabled (mesh without classification)");
+          } else {
+            pinfo("ARMeshAnchor: Scene reconstruction not supported on this device");
+          }
+        } else {
+          worldConfig.sceneReconstruction = ARSceneReconstructionNone;
+        }
+      }
+#endif
     }
   }
 
@@ -1243,6 +1265,104 @@ void VROARSessioniOS::updateAnchorFromNative(
     pinfo("  Boundary vertices: %d", (int)boundaryVertices.size());
 #endif
   }
+
+  // Extract mesh geometry from ARMeshAnchor (iOS 13.4+, LiDAR)
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 134000
+  if (@available(iOS 13.4, *)) {
+    if ([anchor isKindOfClass:[ARMeshAnchor class]]) {
+      ARMeshAnchor *meshAnchor = (ARMeshAnchor *)anchor;
+      std::shared_ptr<VROARMeshAnchor> mAnchor =
+          std::dynamic_pointer_cast<VROARMeshAnchor>(vAnchor);
+
+      if (mAnchor && meshAnchor.geometry) {
+        ARMeshGeometry *geometry = meshAnchor.geometry;
+
+        // Extract vertices (float3, strided)
+        if (geometry.vertices && geometry.vertices.buffer) {
+          ARGeometrySource *vertexSource = geometry.vertices;
+          const uint8_t *baseAddr = (const uint8_t *)[vertexSource.buffer contents];
+          if (baseAddr && vertexSource.count > 0) {
+            NSInteger count = vertexSource.count;
+            NSInteger stride = vertexSource.stride;
+            NSInteger offset = vertexSource.offset;
+
+            std::vector<VROVector3f> vertices;
+            vertices.reserve(count);
+            for (NSInteger i = 0; i < count; i++) {
+              const float *v = (const float *)(baseAddr + offset + i * stride);
+              vertices.emplace_back(v[0], v[1], v[2]);
+            }
+            mAnchor->setVertices(std::move(vertices));
+          }
+        }
+
+        // Extract normals (float3, strided)
+        if (geometry.normals && geometry.normals.buffer) {
+          ARGeometrySource *normalSource = geometry.normals;
+          const uint8_t *baseAddr = (const uint8_t *)[normalSource.buffer contents];
+          if (baseAddr && normalSource.count > 0) {
+            NSInteger count = normalSource.count;
+            NSInteger stride = normalSource.stride;
+            NSInteger offset = normalSource.offset;
+
+            std::vector<VROVector3f> normals;
+            normals.reserve(count);
+            for (NSInteger i = 0; i < count; i++) {
+              const float *n = (const float *)(baseAddr + offset + i * stride);
+              normals.emplace_back(n[0], n[1], n[2]);
+            }
+            mAnchor->setNormals(std::move(normals));
+          }
+        }
+
+        // Extract face indices (uint16 or uint32 depending on bytesPerIndex)
+        if (geometry.faces && geometry.faces.buffer) {
+          ARGeometryElement *faces = geometry.faces;
+          const void *baseAddr = [faces.buffer contents];
+          if (baseAddr && faces.count > 0) {
+            NSInteger indexCount = faces.count * faces.indexCountPerPrimitive;
+            NSInteger bytesPerIndex = faces.bytesPerIndex;
+
+            std::vector<int> faceIndices;
+            faceIndices.reserve(indexCount);
+            if (bytesPerIndex == 2) {
+              const uint16_t *indices = (const uint16_t *)baseAddr;
+              for (NSInteger i = 0; i < indexCount; i++) {
+                faceIndices.push_back((int)indices[i]);
+              }
+            } else {
+              const uint32_t *indices = (const uint32_t *)baseAddr;
+              for (NSInteger i = 0; i < indexCount; i++) {
+                faceIndices.push_back((int)indices[i]);
+              }
+            }
+            mAnchor->setFaceIndices(std::move(faceIndices));
+          }
+        }
+
+        // Extract per-face classifications (may be nil if classification not supported)
+        if (geometry.classification && geometry.classification.buffer) {
+          ARGeometrySource *classSource = geometry.classification;
+          const uint8_t *baseAddr = (const uint8_t *)[classSource.buffer contents];
+          if (baseAddr && classSource.count > 0) {
+            NSInteger count = classSource.count;
+            NSInteger stride = classSource.stride;
+            NSInteger offset = classSource.offset;
+
+            std::vector<int> classifications;
+            classifications.reserve(count);
+            for (NSInteger i = 0; i < count; i++) {
+              const uint8_t *c = baseAddr + offset + i * stride;
+              classifications.push_back((int)*c);
+            }
+            mAnchor->setClassifications(std::move(classifications));
+          }
+        }
+      }
+    }
+  }
+#endif
+
   vAnchor->setTransform(VROConvert::toMatrix4f(anchor.transform));
 }
 
@@ -1296,14 +1416,15 @@ void VROARSessioniOS::addAnchor(ARAnchor *anchor) {
     }
   }
 #endif
-  else {
-    vAnchor = std::make_shared<VROARAnchor>();
+  // Check for ARMeshAnchor (iOS 13.4+, LiDAR scene reconstruction)
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 134000
+  if (@available(iOS 13.4, *)) {
+    if (!vAnchor && [anchor isKindOfClass:[ARMeshAnchor class]]) {
+      vAnchor = std::make_shared<VROARMeshAnchor>();
+    }
   }
+#endif
 
-  // Fallback: Ensure vAnchor is always set for plain ARAnchor objects.
-  // This handles the case where iOS version checks pass but anchor type
-  // doesn't match (e.g., manually created ARAnchor from addAnchorAtPosition).
-  // Without this, vAnchor would be null on iOS 11.3+ for non-plane/image/object anchors.
   if (!vAnchor) {
     vAnchor = std::make_shared<VROARAnchor>();
   }

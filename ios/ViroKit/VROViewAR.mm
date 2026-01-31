@@ -56,6 +56,45 @@
 
 static VROVector3f const kZeroVector = VROVector3f();
 
+struct VROScanWaveConfig {
+    // Timing
+    float duration = 1.0f;           // seconds (total: sweep + fade)
+    float sweepFraction = 0.7f;      // 0-1, fraction for sweep vs fade
+
+    // Reach
+    float maxDepth = 5.0f;           // meters
+
+    // Core wavefront (bright leading edge)
+    float coreBandWidth = 0.25f;     // meters
+    float coreIntensity = 0.6f;
+    float coreColorR = 0.92f;
+    float coreColorG = 0.97f;
+    float coreColorB = 1.0f;
+
+    // Halo zone (soft glow trailing behind core)
+    float haloWidth = 0.5f;          // meters
+    float haloIntensity = 0.25f;
+    float haloColorR = 0.85f;
+    float haloColorG = 0.93f;
+    float haloColorB = 1.0f;
+
+    // Soft rim glow (replaces hard edge detection)
+    float rimColorR = 0.8f;
+    float rimColorG = 0.9f;
+    float rimColorB = 1.0f;
+    float rimIntensity = 0.4f;
+    float rimPower = 3.0f;           // controls glow spread (higher = softer/wider)
+    float edgeThreshold = 0.03f;     // depth gradient sensitivity
+
+    // Noise/shimmer (confined to wavefront)
+    float noiseTintR = 0.9f;
+    float noiseTintG = 0.95f;
+    float noiseTintB = 1.0f;
+    float noiseIntensity = 0.1f;
+    float noiseScale = 80.0f;        // spatial frequency
+    float noiseSpeed = 3.0f;         // animation speed
+};
+
 @interface VROViewAR () {
     std::shared_ptr<VRORenderer> _renderer;
     std::shared_ptr<VROARSceneController> _sceneController;
@@ -78,6 +117,14 @@ static VROVector3f const kZeroVector = VROVector3f();
     bool _depthDebugModifierAdded;
     bool _depthDebugEnabled;
     float _depthDebugOpacity;
+
+    // Scan wave effect state
+    VROScanWaveConfig _scanWaveConfig;
+    std::shared_ptr<VROShaderModifier> _scanWaveModifier;
+    bool _scanWaveModifierAdded;
+    bool _scanWaveEnabled;
+    bool _scanWaveCompleted;
+    double _scanWaveStartTime;
 }
 
 @property (readwrite, nonatomic) VROTrackingType trackingType;
@@ -229,6 +276,10 @@ static VROVector3f const kZeroVector = VROVector3f();
     _depthDebugModifierAdded = false;
     _depthDebugEnabled = false;
     _depthDebugOpacity = 0.5f;
+    _scanWaveModifierAdded = false;
+    _scanWaveEnabled = false;
+    _scanWaveCompleted = false;
+    _scanWaveStartTime = 0;
 
     _inputController = std::make_shared<VROInputControllerAR>(self.frame.size.width * self.contentScaleFactor,
                                                               self.frame.size.height * self.contentScaleFactor,
@@ -386,8 +437,10 @@ static VROVector3f const kZeroVector = VROVector3f();
     // Reset shader modifiers to release GPU shader resources
     _depthDebugModifier.reset();
     _occlusionModifier.reset();
+    _scanWaveModifier.reset();
     _occlusionModifierAdded = false;
     _depthDebugModifierAdded = false;
+    _scanWaveModifierAdded = false;
 
     // Reset camera background surface (holds camera texture)
     _cameraBackground.reset();
@@ -1127,6 +1180,196 @@ static VROVector3f const kZeroVector = VROVector3f();
         }
     }
 
+    // --- Scan wave effect ---
+    // Active when enabled, not yet completed, depth data available, and depth debug is not active
+    bool needsScanWave = _scanWaveEnabled && !_scanWaveCompleted && depthTexture && !_depthDebugEnabled;
+
+    if (needsScanWave) {
+        // Hydrate the depth texture so it's uploaded to the GPU
+        if (!depthTexture->isHydrated()) {
+            depthTexture->prewarm(_driver);
+        }
+
+        // Set the depth texture on the AO slot (same slot used by depth debug)
+        material->getAmbientOcclusion().setTexture(depthTexture);
+        material->updateSubstrateTextures();
+
+        if (!_scanWaveModifierAdded) {
+            // Deferred start time: clock starts on the exact frame the effect first renders,
+            // ensuring depth data is available and the full animation plays out.
+            _scanWaveStartTime = VROTimeCurrentMillis();
+
+            _scanWaveModifier = VROShaderFactory::createScanWaveModifier();
+
+            __weak VROViewAR *weakSelf = self;
+
+            // --- Timing binders (4) ---
+
+            // Time binder: computes elapsed seconds, marks completed when animation ends
+            _scanWaveModifier->setUniformBinder("scan_wave_time", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *strongSelf = weakSelf;
+                    if (!strongSelf) { uniform->setFloat(99.0f); return; }
+                    double elapsed = (VROTimeCurrentMillis() - strongSelf->_scanWaveStartTime) / 1000.0;
+                    float totalDuration = strongSelf->_scanWaveConfig.duration;
+                    if (elapsed > totalDuration) {
+                        strongSelf->_scanWaveCompleted = true;
+                        uniform->setFloat(99.0f); // sentinel — shader outputs zero contribution
+                    } else {
+                        uniform->setFloat((float)elapsed);
+                    }
+                });
+
+            // Sweep duration binder
+            _scanWaveModifier->setUniformBinder("scan_sweep_duration", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.duration * s->_scanWaveConfig.sweepFraction : 0.7f);
+                });
+
+            // Fade duration binder
+            _scanWaveModifier->setUniformBinder("scan_fade_duration", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.duration * (1.0f - s->_scanWaveConfig.sweepFraction) : 0.3f);
+                });
+
+            // Max depth binder
+            _scanWaveModifier->setUniformBinder("scan_max_depth", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.maxDepth : 5.0f);
+                });
+
+            // --- Core wavefront binders (3) ---
+
+            _scanWaveModifier->setUniformBinder("scan_core_band_width", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.coreBandWidth : 0.25f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_core_intensity", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.coreIntensity : 0.6f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_core_color", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    if (s) {
+                        uniform->setVec3({s->_scanWaveConfig.coreColorR, s->_scanWaveConfig.coreColorG, s->_scanWaveConfig.coreColorB});
+                    } else {
+                        uniform->setVec3({0.92f, 0.97f, 1.0f});
+                    }
+                });
+
+            // --- Halo binders (3) ---
+
+            _scanWaveModifier->setUniformBinder("scan_halo_width", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.haloWidth : 0.5f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_halo_intensity", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.haloIntensity : 0.25f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_halo_color", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    if (s) {
+                        uniform->setVec3({s->_scanWaveConfig.haloColorR, s->_scanWaveConfig.haloColorG, s->_scanWaveConfig.haloColorB});
+                    } else {
+                        uniform->setVec3({0.85f, 0.93f, 1.0f});
+                    }
+                });
+
+            // --- Rim glow binders (4) ---
+
+            _scanWaveModifier->setUniformBinder("scan_rim_color", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    if (s) {
+                        uniform->setVec3({s->_scanWaveConfig.rimColorR, s->_scanWaveConfig.rimColorG, s->_scanWaveConfig.rimColorB});
+                    } else {
+                        uniform->setVec3({0.8f, 0.9f, 1.0f});
+                    }
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_rim_intensity", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.rimIntensity : 0.4f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_rim_power", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.rimPower : 3.0f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_edge_threshold", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.edgeThreshold : 0.03f);
+                });
+
+            // --- Noise binders (4) ---
+
+            _scanWaveModifier->setUniformBinder("scan_noise_tint", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    if (s) {
+                        uniform->setVec3({s->_scanWaveConfig.noiseTintR, s->_scanWaveConfig.noiseTintG, s->_scanWaveConfig.noiseTintB});
+                    } else {
+                        uniform->setVec3({0.9f, 0.95f, 1.0f});
+                    }
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_noise_intensity", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.noiseIntensity : 0.1f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_noise_scale", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.noiseScale : 80.0f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_noise_speed", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.noiseSpeed : 3.0f);
+                });
+
+            material->addShaderModifier(_scanWaveModifier);
+            _scanWaveModifierAdded = true;
+        }
+    } else {
+        // Remove scan wave modifier when not needed
+        if (_scanWaveModifierAdded && _scanWaveModifier) {
+            material->removeShaderModifier(_scanWaveModifier);
+            _scanWaveModifier.reset();
+            _scanWaveModifierAdded = false;
+
+            // Only clear AO texture if depth debug isn't using it
+            if (!_depthDebugModifierAdded) {
+                material->getAmbientOcclusion().setTexture(nullptr);
+            }
+
+            // Reset state so JS can re-trigger by toggling enabled false→true
+            _scanWaveEnabled = false;
+            _scanWaveCompleted = false;
+        }
+    }
+
     // Background camera should NEVER write to depth buffer.
     // Occlusion is handled per-3D-object in the fragment shader via the occlusion mask modifier
     // which is automatically added by VROShaderFactory when arOcclusion capability is enabled.
@@ -1183,6 +1426,77 @@ static VROVector3f const kZeroVector = VROVector3f();
     // When disabled, the uniform binder sets opacity to 0, making the debug overlay invisible.
     // If depth features are completely disabled (no occlusion and no debug), the modifiers
     // will be removed in updateBackgroundOcclusionWithFrame on the next frame.
+}
+
+- (void)setScanWaveEnabled:(BOOL)enabled {
+    // Only trigger on rising edge (false → true)
+    if (enabled && !_scanWaveEnabled) {
+        // NOTE: Start time is NOT set here. It is deferred to the frame where the
+        // modifier is first created (inside updateBackgroundOcclusionWithFrame:),
+        // ensuring the clock starts on the exact frame depth data is available.
+        _scanWaveCompleted = false;
+    }
+    _scanWaveEnabled = enabled;
+}
+
+- (void)setScanWaveConfig:(NSDictionary *)config {
+    if (!config) return;
+
+    // Timing
+    if (config[@"duration"])       _scanWaveConfig.duration       = [config[@"duration"] floatValue] / 1000.0f;
+    if (config[@"sweepFraction"])   _scanWaveConfig.sweepFraction  = [config[@"sweepFraction"] floatValue];
+    if (config[@"maxDepth"])        _scanWaveConfig.maxDepth       = [config[@"maxDepth"] floatValue];
+
+    // Core wavefront
+    if (config[@"coreBandWidth"])   _scanWaveConfig.coreBandWidth  = [config[@"coreBandWidth"] floatValue];
+    if (config[@"coreIntensity"])   _scanWaveConfig.coreIntensity  = [config[@"coreIntensity"] floatValue];
+
+    // Halo
+    if (config[@"haloWidth"])       _scanWaveConfig.haloWidth      = [config[@"haloWidth"] floatValue];
+    if (config[@"haloIntensity"])   _scanWaveConfig.haloIntensity  = [config[@"haloIntensity"] floatValue];
+
+    // Rim glow
+    if (config[@"rimIntensity"])    _scanWaveConfig.rimIntensity   = [config[@"rimIntensity"] floatValue];
+    if (config[@"rimPower"])        _scanWaveConfig.rimPower       = [config[@"rimPower"] floatValue];
+    if (config[@"edgeThreshold"])   _scanWaveConfig.edgeThreshold  = [config[@"edgeThreshold"] floatValue];
+
+    // Noise
+    if (config[@"noiseIntensity"])  _scanWaveConfig.noiseIntensity = [config[@"noiseIntensity"] floatValue];
+    if (config[@"noiseScale"])      _scanWaveConfig.noiseScale     = [config[@"noiseScale"] floatValue];
+    if (config[@"noiseSpeed"])      _scanWaveConfig.noiseSpeed     = [config[@"noiseSpeed"] floatValue];
+
+    // Color arrays
+    NSArray *waveCoreColor = config[@"waveCoreColor"];
+    if (waveCoreColor && waveCoreColor.count == 3) {
+        _scanWaveConfig.coreColorR = [waveCoreColor[0] floatValue];
+        _scanWaveConfig.coreColorG = [waveCoreColor[1] floatValue];
+        _scanWaveConfig.coreColorB = [waveCoreColor[2] floatValue];
+    }
+    NSArray *waveHaloColor = config[@"waveHaloColor"];
+    if (waveHaloColor && waveHaloColor.count == 3) {
+        _scanWaveConfig.haloColorR = [waveHaloColor[0] floatValue];
+        _scanWaveConfig.haloColorG = [waveHaloColor[1] floatValue];
+        _scanWaveConfig.haloColorB = [waveHaloColor[2] floatValue];
+    }
+    NSArray *rimColor = config[@"rimColor"];
+    if (rimColor && rimColor.count == 3) {
+        _scanWaveConfig.rimColorR = [rimColor[0] floatValue];
+        _scanWaveConfig.rimColorG = [rimColor[1] floatValue];
+        _scanWaveConfig.rimColorB = [rimColor[2] floatValue];
+    }
+    NSArray *noiseTint = config[@"noiseTint"];
+    if (noiseTint && noiseTint.count == 3) {
+        _scanWaveConfig.noiseTintR = [noiseTint[0] floatValue];
+        _scanWaveConfig.noiseTintG = [noiseTint[1] floatValue];
+        _scanWaveConfig.noiseTintB = [noiseTint[2] floatValue];
+    }
+
+    // Config clamping — prevent divide-by-zero and undefined smoothstep
+    _scanWaveConfig.duration      = fmaxf(0.05f, _scanWaveConfig.duration);
+    _scanWaveConfig.sweepFraction = fminf(fmaxf(_scanWaveConfig.sweepFraction, 0.01f), 0.99f);
+    _scanWaveConfig.coreBandWidth = fmaxf(0.01f, _scanWaveConfig.coreBandWidth);
+    _scanWaveConfig.haloWidth     = fmaxf(0.01f, _scanWaveConfig.haloWidth);
+    _scanWaveConfig.rimPower      = fminf(fmaxf(_scanWaveConfig.rimPower, 0.5f), 8.0f);
 }
 
 #pragma mark - Monocular Depth Estimation

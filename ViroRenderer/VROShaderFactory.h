@@ -91,6 +91,14 @@ public:
      */
     static std::shared_ptr<VROShaderModifier> createDepthDebugModifier();
 
+    /*
+     Creates a shader modifier that renders a depth-based scan wave effect on the
+     camera background. A bright wave front sweeps outward from the camera (near → far),
+     revealing surface contour edges as it passes, then fades out. All animation
+     parameters are driven by uniform binders set by the caller.
+     */
+    static std::shared_ptr<VROShaderModifier> createScanWaveModifier();
+
 private:
     
     /*

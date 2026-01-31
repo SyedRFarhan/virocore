@@ -1299,6 +1299,18 @@ public class Material {
     private native void nativeSetChromaKeyFilteringEnabled(long nativeRef, boolean enabled);
     private native void nativeSetChromaKeyFilteringColor(long nativeRef, int color);
     private native void nativeSetColorWriteMask(long nativeRef, String[] masks);
+    private native void nativeAddShaderModifier(long nativeRef, String entryPoint, String[] codeLines);
+
+    /**
+     * Add a shader modifier to this Material. Shader modifiers inject custom GLSL code at
+     * specific entry points in the rendering pipeline.
+     *
+     * @param entryPoint One of "geometry", "vertex", "surface", "lighting", "fragment".
+     * @param codeLines  Array of GLSL code lines to inject.
+     */
+    public void addShaderModifier(String entryPoint, String[] codeLines) {
+        nativeAddShaderModifier(mNativeRef, entryPoint, codeLines);
+    }
 
     /**
      * Builder for creating {@link Material} objects.

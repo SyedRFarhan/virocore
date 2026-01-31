@@ -104,6 +104,7 @@ private:
      */
     VROUniform *_diffuseSurfaceColorUniform;
     VROUniform *_diffuseIntensityUniform;
+    VROUniform *_diffuseContentsTransformUniform;
     VROUniform *_alphaUniform;
     VROUniform *_alphaCutoffUniform;
     VROUniform *_shininessUniform;
