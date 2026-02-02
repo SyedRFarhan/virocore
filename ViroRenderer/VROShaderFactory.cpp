@@ -1441,6 +1441,13 @@ std::shared_ptr<VROShaderModifier> VROShaderFactory::createScanWaveModifier() {
         "uniform highp float scan_noise_scale;",
         "uniform highp float scan_noise_speed;",
 
+        // --- Trailing falloff / compositing ---
+        "uniform highp float scan_trail_length;",
+        "uniform highp float scan_detail_min;",
+        "uniform highp float scan_tonemap_exposure;",
+        "uniform highp vec3  scan_accent_color;",
+        "uniform highp float scan_accent_intensity;",
+
         // 1. Screen UV → depth UV
         "highp vec2 sw_screenUV = gl_FragCoord.xy / ar_viewport_size.xy;",
         "sw_screenUV.y = 1.0 - sw_screenUV.y;",
@@ -1479,35 +1486,43 @@ std::shared_ptr<VROShaderModifier> VROShaderFactory::createScanWaveModifier() {
         "highp float sw_proximityRadius = max(scan_core_band_width, scan_halo_width);",
         "highp float sw_waveProximity = 1.0 - smoothstep(0.0, sw_proximityRadius, abs(sw_delta));",
 
-        // 8. Behind-wave mask (rim glow flashes as wave passes, then fades)
-        "highp float sw_behindWave = 1.0 - smoothstep(sw_scanDist - scan_core_band_width, sw_scanDist, sw_depth);",
+        // 8. Trailing mask — rim glow only persists within trailLength behind the wavefront.
+        "highp float sw_trailDist = max(0.0, sw_scanDist - sw_depth);",
+        "highp float sw_trailMask = 1.0 - smoothstep(0.0, scan_trail_length, sw_trailDist);",
 
-        // 9. Hash noise confined tightly to wavefront
+        // 9. Tight rim proximity — rim uses coreBW * 1.5 (not the wider haloWidth),
+        //    squared for faster falloff. Prevents full-scene outlines.
+        "highp float sw_rimProxRadius = scan_core_band_width * 1.5;",
+        "highp float sw_rimProximity = 1.0 - smoothstep(0.0, sw_rimProxRadius, abs(sw_delta));",
+        "sw_rimProximity *= sw_rimProximity;",
+
+        // 10. Hash noise confined tightly to wavefront
         "highp float sw_noise = fract(sin(dot(sw_screenUV * scan_noise_scale + scan_wave_time * scan_noise_speed, vec2(12.9898, 78.233))) * 43758.5453);",
         "highp float sw_noiseMask = smoothstep(0.0, scan_core_band_width, scan_core_band_width - abs(sw_delta));",
         "highp vec3 sw_noiseContrib = scan_noise_tint * sw_noise * scan_noise_intensity * sw_noiseMask;",
 
-        // 10. Global fade
+        // 11. Global fade
         "highp float sw_fade = 1.0 - smoothstep(scan_sweep_duration, scan_sweep_duration + scan_fade_duration, scan_wave_time);",
 
-        // 11. Detail mask — attenuate core/halo on flat surfaces, emphasize edges.
-        //     Reuses sw_rimBase (depth gradient smoothstep) already computed for rim glow.
-        "highp float sw_detailGain = mix(0.15, 1.0, sw_rimBase);",
+        // 12. Detail mask — attenuate core/halo on flat surfaces, emphasize edges.
+        "highp float sw_detailGain = mix(scan_detail_min, 1.0, sw_rimBase);",
 
-        // 12. Combine — core/halo attenuated on flat surfaces, rim already edge-based
+        // 13. Accent tint — thin color band at the leading edge of the wavefront
+        "highp float sw_accentMask = smoothstep(0.0, scan_core_band_width * 0.5, scan_core_band_width * 0.5 - abs(sw_delta));",
+        "highp vec3 sw_accentContrib = scan_accent_color * scan_accent_intensity * sw_accentMask;",
+
+        // 14. Combine — rim uses tight proximity + trail mask, core/halo use broad proximity
         "highp vec3 sw_coreContrib  = scan_core_color * sw_coreBand * scan_core_intensity * sw_detailGain;",
         "highp vec3 sw_haloContrib  = scan_halo_color * sw_haloBand * scan_halo_intensity * sw_waveProximity * sw_detailGain;",
-        "highp vec3 sw_rimContrib   = scan_rim_color  * sw_rimGlow  * scan_rim_intensity * sw_behindWave * sw_waveProximity;",
-        "highp vec3 sw_totalAdd     = (sw_coreContrib + sw_haloContrib + sw_rimContrib + sw_noiseContrib) * sw_fade;",
+        "highp vec3 sw_rimContrib   = scan_rim_color  * sw_rimGlow  * scan_rim_intensity * sw_trailMask * sw_rimProximity;",
+        "highp vec3 sw_totalAdd     = (sw_coreContrib + sw_haloContrib + sw_rimContrib + sw_noiseContrib + sw_accentContrib) * sw_fade;",
 
         // Skip pixels with no depth data
         "if (sw_depth > 0.001) {",
 
-        // Screen blend — prevents overexposure without darkening bright surfaces.
-        // Tonemap the additive contribution first (compress to 0-1), then screen composite.
-        // This avoids the grey wash caused by tonemapping the entire base+add result.
+        // Screen blend — tonemap the additive contribution, then screen composite.
         "    highp vec3 sw_base = _surface.diffuse_color.rgb;",
-        "    highp vec3 sw_add  = 1.0 - exp(-sw_totalAdd * 1.5);",
+        "    highp vec3 sw_add  = 1.0 - exp(-sw_totalAdd * scan_tonemap_exposure);",
         "    _surface.diffuse_color.rgb = sw_base + sw_add * (vec3(1.0) - sw_base);",
         "}"
     };

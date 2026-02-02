@@ -93,6 +93,17 @@ struct VROScanWaveConfig {
     float noiseIntensity = 0.1f;
     float noiseScale = 80.0f;        // spatial frequency
     float noiseSpeed = 3.0f;         // animation speed
+
+    // Trailing falloff / compositing (configurable from JS)
+    float trailLength = 0.5f;        // meters — how far behind wavefront rim persists
+    float detailMin = 0.15f;         // 0-1 — flat surface brightness floor
+    float tonemapExposure = 1.5f;    // additive contribution tonemap exposure
+
+    // Accent tint at leading edge
+    float accentColorR = 0.55f;
+    float accentColorG = 0.70f;
+    float accentColorB = 1.0f;
+    float accentIntensity = 0.0f;    // off by default
 };
 
 @interface VROViewAR () {
@@ -125,6 +136,12 @@ struct VROScanWaveConfig {
     bool _scanWaveEnabled;
     bool _scanWaveCompleted;
     double _scanWaveStartTime;
+
+    // Scan wave looping state
+    int _scanWaveRepeatCount;        // 0 = use totalDuration only. Default: 1
+    float _scanWaveTotalDuration;    // seconds. 0 = use repeatCount only.
+    int _scanWaveCurrentLoop;        // current loop index (0-based)
+    double _scanWaveLoopStartTime;   // start of current loop iteration (ms)
 }
 
 @property (readwrite, nonatomic) VROTrackingType trackingType;
@@ -1198,6 +1215,7 @@ struct VROScanWaveConfig {
             // Deferred start time: clock starts on the exact frame the effect first renders,
             // ensuring depth data is available and the full animation plays out.
             _scanWaveStartTime = VROTimeCurrentMillis();
+            _scanWaveLoopStartTime = _scanWaveStartTime;
 
             _scanWaveModifier = VROShaderFactory::createScanWaveModifier();
 
@@ -1205,19 +1223,44 @@ struct VROScanWaveConfig {
 
             // --- Timing binders (4) ---
 
-            // Time binder: computes elapsed seconds, marks completed when animation ends
+            // Time binder: computes per-loop elapsed seconds, handles loop transitions
             _scanWaveModifier->setUniformBinder("scan_wave_time", VROShaderProperty::Float,
                 [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
-                    VROViewAR *strongSelf = weakSelf;
-                    if (!strongSelf) { uniform->setFloat(99.0f); return; }
-                    double elapsed = (VROTimeCurrentMillis() - strongSelf->_scanWaveStartTime) / 1000.0;
-                    float totalDuration = strongSelf->_scanWaveConfig.duration;
-                    if (elapsed > totalDuration) {
-                        strongSelf->_scanWaveCompleted = true;
-                        uniform->setFloat(99.0f); // sentinel — shader outputs zero contribution
-                    } else {
-                        uniform->setFloat((float)elapsed);
+                    VROViewAR *s = weakSelf;
+                    if (!s) { uniform->setFloat(99.0f); return; }
+
+                    double now = VROTimeCurrentMillis();
+                    float loopElapsed = (float)((now - s->_scanWaveLoopStartTime) / 1000.0);
+                    float sweepDuration = s->_scanWaveConfig.duration * s->_scanWaveConfig.sweepFraction;
+                    float totalAnimDuration = s->_scanWaveConfig.duration;
+
+                    // Determine if this is the last loop
+                    bool isLastLoop = false;
+                    if (s->_scanWaveRepeatCount > 0 && s->_scanWaveCurrentLoop >= s->_scanWaveRepeatCount - 1) {
+                        isLastLoop = true;
                     }
+                    if (s->_scanWaveTotalDuration > 0) {
+                        float globalElapsed = (float)((now - s->_scanWaveStartTime) / 1000.0);
+                        if (globalElapsed >= s->_scanWaveTotalDuration) {
+                            isLastLoop = true;
+                        }
+                    }
+
+                    // Intermediate loops: restart at sweep end (skip fade)
+                    if (!isLastLoop && loopElapsed >= sweepDuration) {
+                        s->_scanWaveCurrentLoop++;
+                        s->_scanWaveLoopStartTime = now;
+                        loopElapsed = 0.0f;
+                    }
+
+                    // Final loop: after full animation (sweep + fade), auto-disable
+                    if (isLastLoop && loopElapsed >= totalAnimDuration) {
+                        s->_scanWaveCompleted = true;
+                        uniform->setFloat(99.0f); // sentinel — shader outputs zero contribution
+                        return;
+                    }
+
+                    uniform->setFloat(loopElapsed);
                 });
 
             // Sweep duration binder
@@ -1349,6 +1392,41 @@ struct VROScanWaveConfig {
                     uniform->setFloat(s ? s->_scanWaveConfig.noiseSpeed : 3.0f);
                 });
 
+            // --- Trailing falloff / compositing binders ---
+            _scanWaveModifier->setUniformBinder("scan_trail_length", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.trailLength : 0.5f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_detail_min", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.detailMin : 0.15f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_tonemap_exposure", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.tonemapExposure : 1.5f);
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_accent_color", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    if (s) {
+                        uniform->setVec3({s->_scanWaveConfig.accentColorR, s->_scanWaveConfig.accentColorG, s->_scanWaveConfig.accentColorB});
+                    } else {
+                        uniform->setVec3({0.55f, 0.70f, 1.0f});
+                    }
+                });
+
+            _scanWaveModifier->setUniformBinder("scan_accent_intensity", VROShaderProperty::Float,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *s = weakSelf;
+                    uniform->setFloat(s ? s->_scanWaveConfig.accentIntensity : 0.0f);
+                });
+
             material->addShaderModifier(_scanWaveModifier);
             _scanWaveModifierAdded = true;
         }
@@ -1428,15 +1506,35 @@ struct VROScanWaveConfig {
     // will be removed in updateBackgroundOcclusionWithFrame on the next frame.
 }
 
-- (void)setScanWaveEnabled:(BOOL)enabled {
-    // Only trigger on rising edge (false → true)
-    if (enabled && !_scanWaveEnabled) {
-        // NOTE: Start time is NOT set here. It is deferred to the frame where the
-        // modifier is first created (inside updateBackgroundOcclusionWithFrame:),
-        // ensuring the clock starts on the exact frame depth data is available.
-        _scanWaveCompleted = false;
+- (void)triggerScanWave:(NSDictionary * _Nullable)config {
+    // Apply config overrides if provided (merged onto existing defaults)
+    if (config) {
+        [self setScanWaveConfig:config];
     }
-    _scanWaveEnabled = enabled;
+
+    // Parse loop parameters from config
+    _scanWaveRepeatCount = 1;    // default: single sweep
+    _scanWaveTotalDuration = 0;  // default: no time limit
+    if (config[@"repeatCount"]) {
+        _scanWaveRepeatCount = [config[@"repeatCount"] intValue];
+    }
+    if (config[@"totalDuration"]) {
+        _scanWaveTotalDuration = [config[@"totalDuration"] floatValue] / 1000.0f; // ms → seconds
+    }
+
+    // Reset loop state
+    _scanWaveCurrentLoop = 0;
+    _scanWaveCompleted = false;
+    _scanWaveEnabled = true;
+
+    // NOTE: _scanWaveStartTime and _scanWaveLoopStartTime are deferred to the frame
+    // where the modifier is first created (inside updateBackgroundOcclusionWithFrame:),
+    // ensuring the clock starts on the exact frame depth data is available.
+}
+
+- (void)stopScanWave {
+    _scanWaveEnabled = false;
+    _scanWaveCompleted = true;
 }
 
 - (void)setScanWaveConfig:(NSDictionary *)config {
@@ -1465,6 +1563,12 @@ struct VROScanWaveConfig {
     if (config[@"noiseScale"])      _scanWaveConfig.noiseScale     = [config[@"noiseScale"] floatValue];
     if (config[@"noiseSpeed"])      _scanWaveConfig.noiseSpeed     = [config[@"noiseSpeed"] floatValue];
 
+    // Trailing falloff / compositing
+    if (config[@"trailLength"])      _scanWaveConfig.trailLength      = [config[@"trailLength"] floatValue];
+    if (config[@"detailMin"])        _scanWaveConfig.detailMin        = [config[@"detailMin"] floatValue];
+    if (config[@"tonemapExposure"])  _scanWaveConfig.tonemapExposure  = [config[@"tonemapExposure"] floatValue];
+    if (config[@"accentIntensity"])  _scanWaveConfig.accentIntensity  = [config[@"accentIntensity"] floatValue];
+
     // Color arrays
     NSArray *waveCoreColor = config[@"waveCoreColor"];
     if (waveCoreColor && waveCoreColor.count == 3) {
@@ -1490,13 +1594,22 @@ struct VROScanWaveConfig {
         _scanWaveConfig.noiseTintG = [noiseTint[1] floatValue];
         _scanWaveConfig.noiseTintB = [noiseTint[2] floatValue];
     }
+    NSArray *accentColor = config[@"accentColor"];
+    if (accentColor && accentColor.count == 3) {
+        _scanWaveConfig.accentColorR = [accentColor[0] floatValue];
+        _scanWaveConfig.accentColorG = [accentColor[1] floatValue];
+        _scanWaveConfig.accentColorB = [accentColor[2] floatValue];
+    }
 
     // Config clamping — prevent divide-by-zero and undefined smoothstep
-    _scanWaveConfig.duration      = fmaxf(0.05f, _scanWaveConfig.duration);
-    _scanWaveConfig.sweepFraction = fminf(fmaxf(_scanWaveConfig.sweepFraction, 0.01f), 0.99f);
-    _scanWaveConfig.coreBandWidth = fmaxf(0.01f, _scanWaveConfig.coreBandWidth);
-    _scanWaveConfig.haloWidth     = fmaxf(0.01f, _scanWaveConfig.haloWidth);
-    _scanWaveConfig.rimPower      = fminf(fmaxf(_scanWaveConfig.rimPower, 0.5f), 8.0f);
+    _scanWaveConfig.duration        = fmaxf(0.05f, _scanWaveConfig.duration);
+    _scanWaveConfig.sweepFraction   = fminf(fmaxf(_scanWaveConfig.sweepFraction, 0.01f), 0.99f);
+    _scanWaveConfig.coreBandWidth   = fmaxf(0.01f, _scanWaveConfig.coreBandWidth);
+    _scanWaveConfig.haloWidth       = fmaxf(0.01f, _scanWaveConfig.haloWidth);
+    _scanWaveConfig.rimPower        = fminf(fmaxf(_scanWaveConfig.rimPower, 0.5f), 8.0f);
+    _scanWaveConfig.trailLength     = fmaxf(0.01f, _scanWaveConfig.trailLength);
+    _scanWaveConfig.detailMin       = fminf(fmaxf(_scanWaveConfig.detailMin, 0.0f), 1.0f);
+    _scanWaveConfig.tonemapExposure = fmaxf(0.1f, _scanWaveConfig.tonemapExposure);
 }
 
 #pragma mark - Monocular Depth Estimation
