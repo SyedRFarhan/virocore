@@ -33,7 +33,43 @@
 #include "VROLog.h"
 #include "VROTime.h"
 #include "VROConvert.h"
+#import <Metal/Metal.h>
 #include <cmath>
+
+// IEEE 754 half-precision float (16-bit) to 32-bit float conversion
+static inline float float16ToFloat32(uint16_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exponent = (h >> 10) & 0x1F;
+    uint32_t mantissa = h & 0x03FF;
+
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            // Zero
+            uint32_t result = sign;
+            float f;
+            memcpy(&f, &result, sizeof(f));
+            return f;
+        }
+        // Subnormal: normalize
+        while (!(mantissa & 0x0400)) {
+            mantissa <<= 1;
+            exponent--;
+        }
+        exponent++;
+        mantissa &= ~0x0400;
+    } else if (exponent == 31) {
+        // Inf/NaN
+        uint32_t result = sign | 0x7F800000 | (mantissa << 13);
+        float f;
+        memcpy(&f, &result, sizeof(f));
+        return f;
+    }
+
+    uint32_t result = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    float f;
+    memcpy(&f, &result, sizeof(f));
+    return f;
+}
 
 #pragma mark - Lifecycle
 
@@ -148,6 +184,11 @@ bool VROMonocularDepthEstimator::initWithModel(NSString *modelPath) {
             if (requestError) {
                 pwarn("VROMonocularDepthEstimator: Inference error: %s",
                       [[requestError localizedDescription] UTF8String]);
+                // Ensure we release the processing image on error to avoid retaining ARFrames
+                if (estimator && estimator->_processingImage) {
+                    CVBufferRelease(estimator->_processingImage);
+                    estimator->_processingImage = nullptr;
+                }
                 return;
             }
 
@@ -155,7 +196,64 @@ bool VROMonocularDepthEstimator::initWithModel(NSString *modelPath) {
             NSArray *results = request.results;
             if (results.count == 0) {
                 pwarn("VROMonocularDepthEstimator: No results from inference");
+                // Ensure we release the processing image on error to avoid retaining ARFrames
+                if (estimator && estimator->_processingImage) {
+                    CVBufferRelease(estimator->_processingImage);
+                    estimator->_processingImage = nullptr;
+                }
                 return;
+            }
+
+            // Log all results to find the correct output
+            static bool loggedResults = false;
+            if (!loggedResults) {
+                loggedResults = true;
+                NSLog(@"[VIRO_MONO_DEBUG] === Inference Results: %lu observations ===", (unsigned long)results.count);
+                for (NSUInteger i = 0; i < results.count; i++) {
+                    VNObservation *obs = results[i];
+                    NSLog(@"[VIRO_MONO_DEBUG] Result[%lu]: class=%@, confidence=%.4f",
+                          (unsigned long)i, NSStringFromClass([obs class]), obs.confidence);
+                    if ([obs isKindOfClass:[VNCoreMLFeatureValueObservation class]]) {
+                        VNCoreMLFeatureValueObservation *fvo = (VNCoreMLFeatureValueObservation *)obs;
+                        NSLog(@"[VIRO_MONO_DEBUG]   featureName='%@'", fvo.featureName);
+                        if (fvo.featureValue.multiArrayValue) {
+                            MLMultiArray *arr = fvo.featureValue.multiArrayValue;
+                            NSLog(@"[VIRO_MONO_DEBUG]   shape=%@, dataType=%ld, strides=%@",
+                                  arr.shape, (long)arr.dataType, arr.strides);
+                            // Sample a few raw bytes to verify data exists
+                            NSLog(@"[VIRO_MONO_DEBUG]   dataPointer=%p, total elements=%ld",
+                                  arr.dataPointer, (long)(arr.count));
+                            if (arr.dataPointer && arr.count > 0) {
+                                uint8_t *bytes = (uint8_t *)arr.dataPointer;
+                                NSLog(@"[VIRO_MONO_DEBUG]   First 16 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                                      bytes[0], bytes[1], bytes[2], bytes[3],
+                                      bytes[4], bytes[5], bytes[6], bytes[7],
+                                      bytes[8], bytes[9], bytes[10], bytes[11],
+                                      bytes[12], bytes[13], bytes[14], bytes[15]);
+                                // Also check bytes at offset 1000 (middle of buffer)
+                                size_t midOffset = arr.count; // element count, check byte at ~mid
+                                if (midOffset > 100) midOffset = 1000;
+                                NSLog(@"[VIRO_MONO_DEBUG]   Bytes at offset %zu: %02X %02X %02X %02X %02X %02X %02X %02X",
+                                      midOffset,
+                                      bytes[midOffset], bytes[midOffset+1], bytes[midOffset+2], bytes[midOffset+3],
+                                      bytes[midOffset+4], bytes[midOffset+5], bytes[midOffset+6], bytes[midOffset+7]);
+                            }
+                        }
+                        if (fvo.featureValue.imageBufferValue) {
+                            CVPixelBufferRef pb = fvo.featureValue.imageBufferValue;
+                            NSLog(@"[VIRO_MONO_DEBUG]   pixelBuffer: %zux%zu, format=%u",
+                                  CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb),
+                                  (unsigned)CVPixelBufferGetPixelFormatType(pb));
+                        }
+                    } else if ([obs isKindOfClass:[VNPixelBufferObservation class]]) {
+                        VNPixelBufferObservation *pbo = (VNPixelBufferObservation *)obs;
+                        CVPixelBufferRef pb = pbo.pixelBuffer;
+                        NSLog(@"[VIRO_MONO_DEBUG]   VNPixelBufferObservation: %zux%zu, format=%u",
+                              CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb),
+                              (unsigned)CVPixelBufferGetPixelFormatType(pb));
+                    }
+                }
+                NSLog(@"[VIRO_MONO_DEBUG] === End Results ===");
             }
 
             VNCoreMLFeatureValueObservation *observation =
@@ -170,6 +268,32 @@ bool VROMonocularDepthEstimator::initWithModel(NSString *modelPath) {
 
     // Configure the request for optimal depth estimation
     _visionRequest.imageCropAndScaleOption = VNImageCropAndScaleOptionScaleFill;
+
+    // Log model input/output descriptions for debugging
+    NSLog(@"[VIRO_MONO_DEBUG] === Model Description ===");
+    for (NSString *inputName in _model.modelDescription.inputDescriptionsByName) {
+        MLFeatureDescription *desc = _model.modelDescription.inputDescriptionsByName[inputName];
+        NSLog(@"[VIRO_MONO_DEBUG] Input '%@': type=%ld", inputName, (long)desc.type);
+        if (desc.imageConstraint) {
+            NSLog(@"[VIRO_MONO_DEBUG]   Image: %zux%zu, pixelFormat=%u",
+                  desc.imageConstraint.pixelsWide,
+                  desc.imageConstraint.pixelsHigh,
+                  (unsigned)desc.imageConstraint.pixelFormatType);
+        }
+        if (desc.multiArrayConstraint) {
+            NSLog(@"[VIRO_MONO_DEBUG]   MultiArray shape: %@, dataType=%ld",
+                  desc.multiArrayConstraint.shape, (long)desc.multiArrayConstraint.dataType);
+        }
+    }
+    for (NSString *outputName in _model.modelDescription.outputDescriptionsByName) {
+        MLFeatureDescription *desc = _model.modelDescription.outputDescriptionsByName[outputName];
+        NSLog(@"[VIRO_MONO_DEBUG] Output '%@': type=%ld", outputName, (long)desc.type);
+        if (desc.multiArrayConstraint) {
+            NSLog(@"[VIRO_MONO_DEBUG]   MultiArray shape: %@, dataType=%ld",
+                  desc.multiArrayConstraint.shape, (long)desc.multiArrayConstraint.dataType);
+        }
+    }
+    NSLog(@"[VIRO_MONO_DEBUG] === End Model Description ===");
 
     _modelLoaded = true;
     pinfo("VROMonocularDepthEstimator: Model loaded successfully");
@@ -189,7 +313,8 @@ bool VROMonocularDepthEstimator::isAvailable() const {
 
 bool VROMonocularDepthEstimator::isSupported() {
     if (@available(iOS 14.0, *)) {
-        return true;
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        return device != nil;
     }
     return false;
 }
@@ -201,11 +326,17 @@ void VROMonocularDepthEstimator::update(const VROARFrame *frame) {
         return;
     }
 
+    // Skip if already processing or frame already queued to avoid ARFrame accumulation
+    if (_isProcessing) {
+        return;
+    }
+
     // Rate limiting - skip if we're processing too fast
     double currentTime = VROTimeCurrentMillis();
     if (_targetFPS > 0) {
         double targetInterval = 1000.0 / _targetFPS;
         if ((currentTime - _lastInferenceTime) < targetInterval) {
+            // Rate-limited to avoid overloading inference
             return;
         }
     }
@@ -222,34 +353,58 @@ void VROMonocularDepthEstimator::update(const VROARFrame *frame) {
     }
 
     // Store the image and transform for processing
+    bool shouldDispatch = false;
     {
         std::lock_guard<std::mutex> lock(_imageMutex);
 
-        // Release previous next image if any
-        if (_nextImage) {
-            CVBufferRelease(_nextImage);
+        // Only queue a new frame if there isn't one already pending
+        if (!_nextImage) {
+            _nextImage = CVBufferRetain(image);
+            _nextTransform = frame->getViewportToCameraImageTransform().invert();
+            _nextOrientation = frameiOS->getImageOrientation();
+            shouldDispatch = true;
+            
+            // DEBUG: Log input details
+            static bool loggedInput = false;
+            if (!loggedInput) {
+                size_t w = CVPixelBufferGetWidth(image);
+                size_t h = CVPixelBufferGetHeight(image);
+                OSType type = CVPixelBufferGetPixelFormatType(image);
+                // Correctly swap bytes for 4CC printing if needed, but simple cast is okay for debug
+                // type is typically '420f' or similar
+                NSLog(@"[VIRO_MONO_DEBUG] Input Image: %zux%zu, Format: %u", w, h, (unsigned int)type);
+                loggedInput = true;
+            }
+            
+        } else {
+            pinfo("VROMonocularDepthEstimator: Skipped frame (already queued)");
         }
-
-        _nextImage = CVBufferRetain(image);
-        _nextTransform = frame->getViewportToCameraImageTransform().invert();
-        _nextOrientation = frameiOS->getImageOrientation();
     }
 
-    // Dispatch inference to depth queue
-    std::weak_ptr<VROMonocularDepthEstimator> weak_self = shared_from_this();
+    // Only dispatch if we actually queued a new frame
+    if (shouldDispatch) {
+        // Update inference time NOW to prevent multiple dispatches
+        _lastInferenceTime = currentTime;
+        NSLog(@"[Monocular Depth] Dispatching inference frame to background queue");
+        pinfo("Dispatching depth inference to background queue");
+        
+        std::weak_ptr<VROMonocularDepthEstimator> weak_self = shared_from_this();
 
-    dispatch_async(_depthQueue, ^{
-        std::shared_ptr<VROMonocularDepthEstimator> strong_self = weak_self.lock();
-        if (strong_self) {
-            strong_self->nextImage();
-        }
-    });
+        dispatch_async(_depthQueue, ^{
+            std::shared_ptr<VROMonocularDepthEstimator> strong_self = weak_self.lock();
+            if (strong_self) {
+                strong_self->nextImage();
+            }
+        });
+    }
 }
 
 void VROMonocularDepthEstimator::nextImage() {
     // Check if we're already processing
     bool expected = false;
     if (!_isProcessing.compare_exchange_strong(expected, true)) {
+        // Already processing, skip this frame
+        pinfo("VROMonocularDepthEstimator: Already processing, skipping");
         return; // Already processing, skip this frame
     }
 
@@ -263,6 +418,7 @@ void VROMonocularDepthEstimator::nextImage() {
 
         if (!_nextImage) {
             _isProcessing = false;
+            pinfo("VROMonocularDepthEstimator: No image queued, returning");
             return;
         }
 
@@ -270,15 +426,20 @@ void VROMonocularDepthEstimator::nextImage() {
         _nextImage = nullptr;
         transform = _nextTransform;
         orientation = _nextOrientation;
+        pinfo("VROMonocularDepthEstimator: Got queued image, cleared queue");
     }
 
     // Store as processing image (we own this reference now)
     if (_processingImage) {
         CVBufferRelease(_processingImage);
+        NSLog(@"[Monocular Depth] Released previous processing image");
+        pinfo("Released previous depth processing image");
     }
     _processingImage = imageToProcess;
 
     // Run inference
+    NSLog(@"[Monocular Depth] Running CoreML inference on frame");
+    pinfo("Starting CoreML depth inference");
     runInference(imageToProcess, transform, orientation);
 }
 
@@ -304,6 +465,12 @@ void VROMonocularDepthEstimator::runInference(CVPixelBufferRef image,
     if (error) {
         pwarn("VROMonocularDepthEstimator: Request failed: %s",
               [[error localizedDescription] UTF8String]);
+        // If the request failed, ensure we release the processing image to avoid retaining ARFrames
+        if (_processingImage) {
+            CVBufferRelease(_processingImage);
+            _processingImage = nullptr;
+            pinfo("VROMonocularDepthEstimator: Released processing image after error");
+        }
     }
 
     // Update diagnostics
@@ -312,18 +479,32 @@ void VROMonocularDepthEstimator::runInference(CVPixelBufferRef image,
 
     // Mark as done processing
     _isProcessing = false;
+    pinfo("Depth inference complete in %.0fms", inferenceTime);
 
-    // Check if there's another frame waiting
-    std::weak_ptr<VROMonocularDepthEstimator> weak_self = shared_from_this();
-    dispatch_async(_depthQueue, ^{
-        std::shared_ptr<VROMonocularDepthEstimator> strong_self = weak_self.lock();
-        if (strong_self) {
-            std::lock_guard<std::mutex> lock(strong_self->_imageMutex);
-            if (strong_self->_nextImage) {
+    // Check if there's another frame waiting and process it
+    // IMPORTANT: Do NOT call nextImage() while holding _imageMutex to avoid deadlock
+    // nextImage() will acquire the mutex, so we must be unlocked here.
+    bool shouldTriggerNext = false;
+    {
+        std::lock_guard<std::mutex> lock(_imageMutex);
+        if (_nextImage) {
+            shouldTriggerNext = true;
+        }
+    }
+
+    if (shouldTriggerNext) {
+        pinfo("Triggering processing for next queued frame");
+        
+        // Dispatch to self (on same serial queue) to process next frame
+        // This avoids recursion and ensures we don't hold any locks
+        std::weak_ptr<VROMonocularDepthEstimator> weak_self = shared_from_this();
+        dispatch_async(_depthQueue, ^{
+            std::shared_ptr<VROMonocularDepthEstimator> strong_self = weak_self.lock();
+            if (strong_self) {
                 strong_self->nextImage();
             }
-        }
-    });
+        });
+    }
 }
 
 #pragma mark - Depth Output Processing
@@ -331,12 +512,22 @@ void VROMonocularDepthEstimator::runInference(CVPixelBufferRef image,
 void VROMonocularDepthEstimator::processDepthOutput(VNCoreMLFeatureValueObservation *result,
                                                      VROMatrix4f transform) {
     if (!result || !result.featureValue) {
+        // Always release processing image, even on error
+        if (_processingImage) {
+            CVBufferRelease(_processingImage);
+            _processingImage = nullptr;
+        }
         return;
     }
 
     MLMultiArray *depthArray = result.featureValue.multiArrayValue;
     if (!depthArray) {
         pwarn("VROMonocularDepthEstimator: No depth array in result");
+        // Always release processing image, even on error
+        if (_processingImage) {
+            CVBufferRelease(_processingImage);
+            _processingImage = nullptr;
+        }
         return;
     }
 
@@ -353,6 +544,11 @@ void VROMonocularDepthEstimator::processDepthOutput(VNCoreMLFeatureValueObservat
     } else {
         pwarn("VROMonocularDepthEstimator: Unexpected shape with %lu dimensions",
               (unsigned long)shape.count);
+        // Always release processing image, even on error
+        if (_processingImage) {
+            CVBufferRelease(_processingImage);
+            _processingImage = nullptr;
+        }
         return;
     }
 
@@ -362,12 +558,92 @@ void VROMonocularDepthEstimator::processDepthOutput(VNCoreMLFeatureValueObservat
         _depthBuffer.resize(bufferSize);
         _previousDepthBuffer.clear(); // Reset temporal filter
     }
-
-    // Copy and scale depth data
-    float *rawDepth = (float *)depthArray.dataPointer;
-    for (size_t i = 0; i < bufferSize; i++) {
-        _depthBuffer[i] = rawDepth[i] * _depthScaleFactor;
+    
+    // Log info about the array type and strides once
+    static bool loggedArrayInfo = false;
+    if (!loggedArrayInfo) {
+        NSLog(@"[VIRO_MONO] MLMultiArray DataType: %ld (1=Double, 2=Float32, 3=Float16)", (long)depthArray.dataType);
+        NSLog(@"[VIRO_MONO] MLMultiArray Strides: %@", depthArray.strides);
+        loggedArrayInfo = true;
     }
+
+    // Copy and process depth data for Depth Anything V2
+    // Model outputs metric depth directly in meters.
+    // Apply a calibration scale factor to align with ARKit distances.
+
+    float *rawDepthFloat = nullptr;
+    double *rawDepthDouble = nullptr;
+    uint16_t *rawDepthFloat16 = nullptr;
+
+    if (depthArray.dataType == MLMultiArrayDataTypeFloat32) {
+        rawDepthFloat = (float *)depthArray.dataPointer;
+    } else if (depthArray.dataType == MLMultiArrayDataTypeDouble) {
+        rawDepthDouble = (double *)depthArray.dataPointer;
+    } else if (depthArray.dataType == 65568 /* MLMultiArrayDataTypeFloat16 */) {
+        rawDepthFloat16 = (uint16_t *)depthArray.dataPointer;
+    }
+
+    // Determine strides based on shape
+    NSInteger strideY = width;
+    NSInteger strideX = 1;
+
+    if (depthArray.strides.count >= 2) {
+        if (shape.count == 3 && depthArray.strides.count >= 3) {
+            strideY = [depthArray.strides[1] integerValue];
+            strideX = [depthArray.strides[2] integerValue];
+        } else {
+            strideY = [depthArray.strides[depthArray.strides.count - 2] integerValue];
+            strideX = [depthArray.strides[depthArray.strides.count - 1] integerValue];
+        }
+
+        if (strideY < width || strideY > width * 2) {
+             NSLog(@"[VIRO_MONO] Warning: Unusual StrideY: %ld (Width: %d). Using packed stride.", (long)strideY, width);
+             strideY = width;
+             strideX = 1;
+        }
+    }
+
+    float minRaw = FLT_MAX;
+    float maxRaw = -FLT_MAX;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            NSInteger rawIndex = y * strideY + x * strideX;
+            size_t packedIndex = y * width + x;
+
+            float rawVal = 0.0f;
+            if (rawDepthFloat) {
+                rawVal = rawDepthFloat[rawIndex];
+            } else if (rawDepthFloat16) {
+                rawVal = float16ToFloat32(rawDepthFloat16[rawIndex]);
+            } else if (rawDepthDouble) {
+                rawVal = (float)rawDepthDouble[rawIndex];
+            } else {
+                @try {
+                    NSArray *key = (shape.count == 3) ? @[@0, @(y), @(x)] : @[@(y), @(x)];
+                    rawVal = [[depthArray objectForKeyedSubscript:key] floatValue];
+                } @catch (NSException *e) {
+                    rawVal = 0.0f;
+                }
+            }
+
+            if (rawVal < minRaw) minRaw = rawVal;
+            if (rawVal > maxRaw) maxRaw = rawVal;
+
+            if (rawVal < 0.0f) rawVal = 0.0f;
+            rawVal *= _depthScaleFactor;
+
+            _depthBuffer[packedIndex] = rawVal;
+        }
+    }
+
+    // Log depth stats occasionally
+    static int logCounter = 0;
+    if (logCounter++ % 30 == 0) {
+        NSLog(@"[VIRO_MONO] DepthAnything Stats: Min=%.4fm, Max=%.4fm (scaled: %.4f-%.4f)",
+              minRaw, maxRaw, minRaw * _depthScaleFactor, maxRaw * _depthScaleFactor);
+    }
+
 
     // Apply temporal filtering if enabled
     if (_temporalFilteringEnabled) {
@@ -387,7 +663,14 @@ void VROMonocularDepthEstimator::processDepthOutput(VNCoreMLFeatureValueObservat
     // Update GPU texture
     updateDepthTexture(_depthBuffer.data(), width, height);
 
-    _lastInferenceTime = VROTimeCurrentMillis();
+    // CRITICAL: Release the processing image now that we're done with it
+    // This prevents ARFrame retention that freezes the camera
+    if (_processingImage) {
+        CVBufferRelease(_processingImage);
+        _processingImage = nullptr;
+        NSLog(@"[VIRO_MONO] Released processing image after depth output");
+        pinfo("VROMonocularDepthEstimator: Released processing image");
+    }
 }
 
 void VROMonocularDepthEstimator::applyTemporalFilter(float *depthData, int width, int height) {
@@ -463,11 +746,16 @@ void VROMonocularDepthEstimator::updateDepthTexture(const float *depthData, int 
     } else {
         // Update existing texture data
         // Note: VROTexture doesn't have updateData, so we recreate
-        // TODO: Add updateData method to VROTexture for efficiency
         size_t dataSize = width * height * sizeof(float);
         std::shared_ptr<VROData> depthVROData = std::make_shared<VROData>(
             (void *)depthData, dataSize, VRODataOwnership::Copy);
         std::vector<std::shared_ptr<VROData>> dataVec = { depthVROData };
+
+        // CAUTION: Destructing the old texture on this background thread (DepthQueue)
+        // can cause a freeze/crash if it holds OpenGL resources (TextureSubstrate)
+        // and this thread has no GL context. We must ensure the old texture is lived
+        // until we can release it on the main thread (which usually shares GL context).
+        std::shared_ptr<VROTexture> oldTexture = _currentDepthTexture;
 
         _currentDepthTexture = std::make_shared<VROTexture>(
             VROTextureType::Texture2D,
@@ -483,18 +771,33 @@ void VROMonocularDepthEstimator::updateDepthTexture(const float *depthData, int 
         _currentDepthTexture->setMagnificationFilter(VROFilterMode::Linear);
         _currentDepthTexture->setWrapS(VROWrapMode::Clamp);
         _currentDepthTexture->setWrapT(VROWrapMode::Clamp);
+        
+        // Dispatch release of old texture to main thread to ensure safe GL cleanup
+        if (oldTexture) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                // Capturing oldTexture keeps it alive until this block runs on main thread
+                // When block finishes, oldTexture is destroyed here on main thread
+                volatile auto keepAlive = oldTexture;
+            });
+        }
     }
 }
 
 VROMatrix4f VROMonocularDepthEstimator::computeDepthTextureTransform(VROMatrix4f imageTransform,
                                                                       int imageWidth, int imageHeight,
                                                                       int depthWidth, int depthHeight) {
-    // The depth texture may have a different resolution than the camera image.
-    // We need to compose the image-to-screen transform with a scaling transform.
-
-    // For now, assume same aspect ratio and just use the image transform
-    // TODO: Handle different aspect ratios properly
-    return imageTransform;
+    // For monocular depth, the depth texture maps directly to the camera view.
+    // Vision's VNCoreMLRequest already handled crop/scale to feed the model,
+    // so the depth output covers the same field of view as the camera image.
+    //
+    // The occlusion shader computes screen UV as:
+    //   screenUV = gl_FragCoord.xy / viewport_size;
+    //   screenUV.y = 1.0 - screenUV.y;  // flip Y to top-left origin
+    //   depthUV = (transform * vec4(screenUV, 0, 1)).xy;
+    //
+    // With identity transform, depthUV = screenUV, which directly samples
+    // the depth texture in the correct orientation.
+    return VROMatrix4f::identity();
 }
 
 #pragma mark - Depth Output Accessors
@@ -511,6 +814,14 @@ VROMatrix4f VROMonocularDepthEstimator::getDepthTextureTransform() const {
 void VROMonocularDepthEstimator::getDepthDimensions(int *outWidth, int *outHeight) const {
     if (outWidth) *outWidth = _depthWidth;
     if (outHeight) *outHeight = _depthHeight;
+}
+
+const float* VROMonocularDepthEstimator::getDepthBufferData() const {
+    std::lock_guard<std::mutex> lock(_depthMutex);
+    if (_depthBuffer.empty()) {
+        return nullptr;
+    }
+    return _depthBuffer.data();
 }
 
 #pragma mark - Configuration
@@ -556,6 +867,9 @@ void VROMonocularDepthEstimator::updateDiagnostics(double inferenceTimeMs) {
     if (_frameCount >= 10) {
         _averageLatencyMs = _latencyAccumulator / _frameCount;
         _currentFPS = 1000.0f / _averageLatencyMs;
+
+        pinfo("VROMonocularDepthEstimator: avg latency %.2f ms, fps %.2f, depth=%dx%d",
+              _averageLatencyMs, _currentFPS, _depthWidth, _depthHeight);
 
         _frameCount = 0;
         _latencyAccumulator = 0;

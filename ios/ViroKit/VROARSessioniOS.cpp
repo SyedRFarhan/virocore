@@ -53,7 +53,6 @@
 #include <algorithm>
 
 #import "VROCloudAnchorProviderARCore.h"
-#import "VROModelDownloader.h"
 #import <simd/simd.h>
 #import <AVFoundation/AVFoundation.h>
 
@@ -67,7 +66,7 @@ VROARSessioniOS::VROARSessioniOS(VROTrackingType trackingType,
       _capturedWorldMap(nil),
       _monocularDepthEnabled(false),
       _preferMonocularDepth(false),
-      _monocularDepthModelURL(nil),
+  _monocularDepthLoading(false),
       _driver(driver) {
 
   if (@available(iOS 11.0, *)) {
@@ -110,6 +109,13 @@ VROARSessioniOS::~VROARSessioniOS() {
 
     // Clear vision model
     _visionModel.reset();
+
+    // Clear monocular depth estimator (releases CoreML model and resources)
+    // This is critical to prevent memory leaks when AR session is destroyed
+    _monocularDepthEnabled = false;
+    if (_monocularDepthEstimator) {
+        _monocularDepthEstimator.reset();
+    }
 
 #if __IPHONE_OS_VERSION_MAX_ALLOWED >= 110300
     // Clear image detection resources
@@ -263,29 +269,13 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
       NSArray<ARVideoFormat *> *videoFormats =
           ARWorldTrackingConfiguration.supportedVideoFormats;
       int numberOfSupportedVideoFormats = (int)[videoFormats count];
-
-      pinfo("[ViroFormat] setVideoQuality called with quality=%s",
-            quality == VROVideoQuality::High ? "High" : "Low");
-      pinfo("[ViroFormat] Found %d supported video formats:", numberOfSupportedVideoFormats);
-
-      // Log all available formats
-      int formatIndex = 0;
-      for (ARVideoFormat *format in videoFormats) {
-        pinfo("[ViroFormat]   [%d] %dx%d @ %.0f FPS",
-              formatIndex,
-              (int)format.imageResolution.width,
-              (int)format.imageResolution.height,
-              format.framesPerSecond);
-        formatIndex++;
-      }
-
       // Since iOS 12, ARWorldTrackingConfiguration.supportedVideoFormats
       // started returning 0 //// supportedVideoFormats here, for simulator
       // targets. In that case, we'll skip the following and run session with
       // default videoformat value
       if (numberOfSupportedVideoFormats > 0) {
         if (quality == VROVideoQuality::High) {
-          ARVideoFormat *highestFormat = nil;
+          ARVideoFormat *highestFormat;
           float high = 0;
           for (ARVideoFormat *format in videoFormats) {
             if (format.imageResolution.height > high) {
@@ -293,16 +283,10 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
               highestFormat = format;
             }
           }
-          if (highestFormat) {
-            ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
-                highestFormat;
-            pinfo("[ViroFormat] SELECTED (High): %dx%d @ %.0f FPS",
-                  (int)highestFormat.imageResolution.width,
-                  (int)highestFormat.imageResolution.height,
-                  highestFormat.framesPerSecond);
-          }
+          ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
+              highestFormat;
         } else {
-          ARVideoFormat *lowestFormat = nil;
+          ARVideoFormat *lowestFormat;
           float low = CGFLOAT_MAX;
           for (ARVideoFormat *format in videoFormats) {
             if (format.imageResolution.height < low) {
@@ -310,17 +294,9 @@ void VROARSessioniOS::setVideoQuality(VROVideoQuality quality) {
               lowestFormat = format;
             }
           }
-          if (lowestFormat) {
-            ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
-                lowestFormat;
-            pinfo("[ViroFormat] SELECTED (Low): %dx%d @ %.0f FPS",
-                  (int)lowestFormat.imageResolution.width,
-                  (int)lowestFormat.imageResolution.height,
-                  lowestFormat.framesPerSecond);
-          }
+          ((ARWorldTrackingConfiguration *)_sessionConfiguration).videoFormat =
+              lowestFormat;
         }
-      } else {
-        pinfo("[ViroFormat] No video formats available, using default");
       }
     }
     [_session runWithConfiguration:_sessionConfiguration];
@@ -742,9 +718,10 @@ std::unique_ptr<VROARFrame> &VROARSessioniOS::updateFrame() {
     _visionModel->update(frameiOS);
   }
 
-  // Update monocular depth estimator if enabled and no LiDAR depth available
+  // Update monocular depth estimator if enabled and either LiDAR is unavailable
+  // or monocular depth is explicitly preferred.
   if (_monocularDepthEnabled && _monocularDepthEstimator) {
-    if (!frameiOS->hasLiDARDepth()) {
+    if (_preferMonocularDepth || !frameiOS->hasLiDARDepth()) {
       _monocularDepthEstimator->update(frameiOS);
     }
   }
@@ -914,16 +891,21 @@ void VROARSessioniOS::removeARObjectTarget(
 void VROARSessioniOS::setOcclusionMode(VROOcclusionMode mode) {
     VROARSession::setOcclusionMode(mode);
 
+  bool lidarSupported = false;
+  if (@available(iOS 14.0, *)) {
+    lidarSupported = [ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticSceneDepth];
+  }
+
     // Enable scene depth in ARKit configuration for depth-based occlusion
     if (@available(iOS 14.0, *)) {
         if ([_sessionConfiguration isKindOfClass:[ARWorldTrackingConfiguration class]]) {
             ARWorldTrackingConfiguration *config = (ARWorldTrackingConfiguration *)_sessionConfiguration;
 
             if (mode == VROOcclusionMode::DepthBased) {
-                // Enable scene depth if supported (requires LiDAR)
-                if ([ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticSceneDepth]) {
-                    config.frameSemantics = ARFrameSemanticSceneDepth;
-                }
+              // Enable scene depth if supported (requires LiDAR)
+              if (lidarSupported) {
+                config.frameSemantics = ARFrameSemanticSceneDepth;
+              }
             } else if (mode == VROOcclusionMode::PeopleOnly) {
                 // Enable person segmentation with depth
                 if ([ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticPersonSegmentationWithDepth]) {
@@ -939,6 +921,24 @@ void VROARSessioniOS::setOcclusionMode(VROOcclusionMode mode) {
             }
         }
     }
+
+        // Transparent monocular fallback for depth-based occlusion on non-LiDAR devices
+        if (mode == VROOcclusionMode::DepthBased && !lidarSupported) {
+          NSLog(@"Occlusion mode DepthBased set on non-LiDAR device - auto-enabling monocular depth");
+          pinfo("Occlusion mode: Depth-based requested on non-LiDAR device, auto-enabling monocular depth");
+          if (!_monocularDepthEnabled) {
+            setMonocularDepthEnabled(true);
+          }
+        }
+
+        // If user prefers monocular depth, ensure estimator is enabled so we can force mono
+        if (mode == VROOcclusionMode::DepthBased && _preferMonocularDepth) {
+          NSLog(@"Occlusion mode: User prefers monocular depth over LiDAR");
+          pinfo("Occlusion mode: User prefers monocular depth, enabling estimator");
+          if (!_monocularDepthEnabled) {
+            setMonocularDepthEnabled(true);
+          }
+        }
 }
 
 bool VROARSessioniOS::isOcclusionSupported() const {
@@ -964,7 +964,25 @@ bool VROARSessioniOS::isOcclusionModeSupported(VROOcclusionMode mode) const {
 
     if (@available(iOS 14.0, *)) {
         if (mode == VROOcclusionMode::DepthBased) {
-            return [ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticSceneDepth];
+      if ([ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticSceneDepth]) {
+        return true;
+      }
+
+      // Fallback: monocular depth estimation support (model + device)
+      if (VROMonocularDepthEstimator::isSupported()) {
+        NSBundle *frameworkBundle = [NSBundle bundleForClass:[VROARKitSessionDelegate class]];
+        if (!frameworkBundle) {
+          frameworkBundle = [NSBundle mainBundle];
+        }
+
+        NSString *bundledPath = [frameworkBundle pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+        if (!bundledPath) {
+          bundledPath = [[NSBundle mainBundle] pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+        }
+
+        return bundledPath != nil;
+      }
+      return false;
         } else if (mode == VROOcclusionMode::PeopleOnly) {
             return [ARWorldTrackingConfiguration supportsFrameSemantics:ARFrameSemanticPersonSegmentationWithDepth];
         }
@@ -976,46 +994,69 @@ bool VROARSessioniOS::isOcclusionModeSupported(VROOcclusionMode mode) const {
 
 void VROARSessioniOS::setMonocularDepthEnabled(bool enabled) {
     _monocularDepthEnabled = enabled;
+    NSLog(@"=== Monocular Depth: %s ===", enabled ? "ENABLED" : "DISABLED");
+    pinfo("=== Monocular Depth: %s ===", enabled ? "ENABLED" : "DISABLED");
+    NSLog(@"Monocular depth %s (loading=%d, estimator=%p)", enabled ? "enabled" : "disabled", _monocularDepthLoading, _monocularDepthEstimator.get());
+    pinfo("Monocular depth %s (loading=%s, estimator=%s)",
+      enabled ? "enabled" : "disabled",
+      _monocularDepthLoading ? "true" : "false",
+      _monocularDepthEstimator ? "initialized" : "null");
 
-    if (enabled && !_monocularDepthEstimator) {
-        // Check if model is already downloaded
-        if ([VROModelDownloader isModelDownloaded:@"DepthPro"]) {
-            NSString *modelPath = [VROModelDownloader localPathForModel:@"DepthPro"];
-            initializeMonocularDepthEstimator(modelPath);
-        } else if (_monocularDepthModelURL) {
-            // Download the model asynchronously
-            pinfo("VROARSessioniOS: Downloading monocular depth model...");
+  if (enabled && !_monocularDepthEstimator && !_monocularDepthLoading) {
+    _monocularDepthLoading = true;
+    NSLog(@"Starting async DepthPro model load on background queue");
+    pinfo("Starting async DepthPro model load on background queue");
 
-            std::weak_ptr<VROARSessioniOS> weak_self = shared_from_this();
-            [VROModelDownloader downloadModelIfNeeded:@"DepthPro"
-                                              fromURL:_monocularDepthModelURL
-                                             progress:^(float progress) {
-                                                 pinfo("VROARSessioniOS: Depth model download progress: %.0f%%", progress * 100);
-                                             }
-                                           completion:^(NSString *localPath, NSError *error) {
-                                               if (error) {
-                                                   pwarn("VROARSessioniOS: Failed to download depth model: %s",
-                                                         [[error localizedDescription] UTF8String]);
-                                                   return;
-                                               }
+    std::weak_ptr<VROARSessioniOS> weakSelf = shared_from_this();
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      auto strongSelf = weakSelf.lock();
+      if (!strongSelf) {
+        return;
+      }
 
-                                               std::shared_ptr<VROARSessioniOS> strong_self = weak_self.lock();
-                                               if (strong_self && strong_self->_monocularDepthEnabled) {
-                                                   strong_self->initializeMonocularDepthEstimator(localPath);
-                                               }
-                                           }];
-        } else {
-            // Try bundled model as fallback
-            NSString *bundledPath = [[NSBundle mainBundle] pathForResource:@"DepthPro" ofType:@"mlmodelc"];
-            if (bundledPath) {
-                initializeMonocularDepthEstimator(bundledPath);
-            } else {
-                pwarn("VROARSessioniOS: No depth model available. Call setMonocularDepthModelURL first.");
-            }
-        }
-    } else if (!enabled && _monocularDepthEstimator) {
-        // Disable - clear the estimator to save resources
-        _monocularDepthEstimator.reset();
+      // If monocular depth was disabled while loading, skip initialization
+      if (!strongSelf->_monocularDepthEnabled) {
+        strongSelf->_monocularDepthLoading = false;
+        return;
+      }
+
+      // Try framework bundle first (model bundled in ViroKit)
+      NSBundle *frameworkBundle = [NSBundle bundleForClass:[VROARKitSessionDelegate class]];
+
+      // Fallback to main app bundle (for custom deployments)
+      if (!frameworkBundle) {
+        frameworkBundle = [NSBundle mainBundle];
+      }
+
+      NSString *bundledPath = [frameworkBundle pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+
+      // Fallback to main app bundle (for custom deployments)
+      if (!bundledPath) {
+        bundledPath = [[NSBundle mainBundle] pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+      }
+
+      if (bundledPath) {
+        NSLog(@"DepthPro model found at: %s", [bundledPath UTF8String]);
+        pinfo("DepthPro model found at: %s", [bundledPath UTF8String]);
+        strongSelf->initializeMonocularDepthEstimator(bundledPath);
+      } else {
+        NSLog(@"DepthPro.mlmodelc not found in bundle - monocular depth unavailable");
+        pwarn("DepthPro.mlmodelc not found in bundle - monocular depth unavailable");
+      }
+
+      strongSelf->_monocularDepthLoading = false;
+      NSLog(@"Monocular depth model load finished (estimator=%s)", strongSelf->_monocularDepthEstimator ? "initialized" : "failed");
+      pinfo("Monocular depth model load finished (estimator=%s)",
+          strongSelf->_monocularDepthEstimator ? "initialized" : "failed");
+    });
+  } else if (!enabled) {
+    _monocularDepthLoading = false;
+    NSLog(@"Disabling monocular depth, clearing estimator");
+    pinfo("Disabling monocular depth, clearing estimator");
+    // Disable - clear the estimator to save resources
+    if (_monocularDepthEstimator) {
+      _monocularDepthEstimator.reset();
+    }
     }
 }
 
@@ -1036,32 +1077,47 @@ std::shared_ptr<VROMonocularDepthEstimator> VROARSessioniOS::getMonocularDepthEs
 
 void VROARSessioniOS::setPreferMonocularDepth(bool prefer) {
     _preferMonocularDepth = prefer;
-    pinfo("VROARSessioniOS: Prefer monocular depth set to %s", prefer ? "true" : "false");
+    NSLog(@"Prefer monocular depth over LiDAR: %s", prefer ? "YES" : "NO");
+    pinfo("Prefer monocular depth over LiDAR: %s", prefer ? "YES" : "NO");
+
+  if (prefer && !_monocularDepthEnabled) {
+    // If occlusion mode is already DepthBased, we should enable monocular depth now
+    // since the user explicitly requested preference for it
+    if (getOcclusionMode() == VROOcclusionMode::DepthBased) {
+        NSLog(@"[Monocular Depth] Preference set while DepthBased occlusion active - enabling estimator");
+        pinfo("Preference set while DepthBased occlusion active, enabling monocular depth");
+        setMonocularDepthEnabled(true);
+    } else {
+        NSLog(@"[Monocular Depth] Preference set but occlusion not DepthBased - waiting to enable");
+        pinfo("Preference set but monocular depth not yet enabled (occlusion mode not DepthBased)");
+    }
+  }
 }
 
 bool VROARSessioniOS::isPreferMonocularDepth() const {
     return _preferMonocularDepth;
 }
 
-void VROARSessioniOS::setMonocularDepthModelURL(NSURL *baseURL) {
-    _monocularDepthModelURL = baseURL;
-}
-
 void VROARSessioniOS::initializeMonocularDepthEstimator(NSString *modelPath) {
+    NSLog(@"Initializing monocular depth estimator with model: %s", [modelPath UTF8String]);
+    pinfo("Initializing monocular depth estimator with model: %s", [modelPath UTF8String]);
     if (!_driver) {
-        pwarn("VROARSessioniOS: Cannot initialize depth estimator - no driver");
+        NSLog(@"ERROR: Cannot initialize depth estimator - no driver available");
+        pwarn("Cannot initialize depth estimator - no driver available");
         return;
     }
 
     _monocularDepthEstimator = std::make_shared<VROMonocularDepthEstimator>(_driver);
 
     if (!_monocularDepthEstimator->initWithModel(modelPath)) {
-        pwarn("VROARSessioniOS: Failed to initialize monocular depth estimator");
+        NSLog(@"ERROR: Failed to initialize monocular depth estimator");
+        pwarn("Failed to initialize monocular depth estimator");
         _monocularDepthEstimator.reset();
         return;
     }
 
-    pinfo("VROARSessioniOS: Monocular depth estimator initialized successfully");
+    NSLog(@"SUCCESS: Monocular depth estimator initialized and model loaded successfully");
+    pinfo("Monocular depth estimator initialized and model loaded successfully");
 }
 
 #pragma mark - Internal Methods
@@ -1837,3 +1893,4 @@ void VROARSessioniOS::clearCapturedWorldMap() {
 @end
 
 #endif
+

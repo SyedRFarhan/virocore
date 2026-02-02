@@ -35,6 +35,7 @@
 #include "VROConvert.h"
 #include "VROVector4f.h"
 #include "VROARHitTestResult.h"
+#include "VROARHitTestResultiOS.h"
 #include "VROLight.h"
 #include "VROCameraTexture.h"
 #include "VROTexture.h"
@@ -148,28 +149,22 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameiOS::hitTest(int x, i
     if (session) {
         float renderZoom = session->getRenderZoom();
         if (renderZoom > 1.0f) {
-            // The zoomed viewport shows the center (1/zoom) portion of the camera image
-            // To find the camera image point, we scale up from center and offset
             float scale = 1.0f / renderZoom;
             float offset = (1.0f - scale) / 2.0f;
-
-            // Transform normalized viewport point to account for zoom crop
-            // The viewport center (0.5, 0.5) maps to camera center (0.5, 0.5)
-            // But viewport edge maps to the crop boundary, not camera edge
             pointViewport.x = offset + pointViewport.x * scale;
             pointViewport.y = offset + pointViewport.y * scale;
         }
     }
 
     VROVector3f pointCameraImage = viewportSpaceToCameraImageSpace.multiply(pointViewport);
-    
+
     /*
      Perform the ARKit hit test.
      */
     CGPoint point = CGPointMake(pointCameraImage.x, pointCameraImage.y);
     ARHitTestResultType typesAR = convertResultTypes(types);
     NSArray<ARHitTestResult *> *results = [_frame hitTest:point types:typesAR];
-    
+
     /*
      Convert the results to VROARHitTestResult objects.
      (Reuse the session pointer obtained above for zoom calculations)
@@ -180,13 +175,86 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameiOS::hitTest(int x, i
         if (session && result.anchor) {
             vAnchor = session->getAnchorForNative(result.anchor);
         }
-        
-        std::shared_ptr<VROARHitTestResult> vResult = std::make_shared<VROARHitTestResult>(convertResultType(result.type), vAnchor, result.distance,
+
+        std::shared_ptr<VROARHitTestResult> vResult = std::make_shared<VROARHitTestResultiOS>(convertResultType(result.type), vAnchor, result.distance,
                                    VROConvert::toMatrix4f(result.worldTransform),
-                                   VROConvert::toMatrix4f(result.localTransform));
+                                   VROConvert::toMatrix4f(result.localTransform),
+                                   result,
+                                   session);
         vResults.push_back(vResult);
     }
-    
+
+    // Enhance all hit test results with depth data if available
+    std::shared_ptr<VROTexture> depthTexture = getDepthTexture();
+    if (depthTexture && hasDepthData()) {
+        pinfo("Depth texture available, enhancing %zu hit results with depth data", vResults.size());
+        // Determine depth source
+        std::string depthSource = "none";
+        bool preferMonocular = session && session->isPreferMonocularDepth();
+
+        if (preferMonocular) {
+            depthSource = "monocular";
+        } else if (hasLiDARDepth()) {
+            depthSource = "lidar";
+        } else {
+            depthSource = "monocular";
+        }
+
+        // Get depth transform and confidence texture
+        VROMatrix4f depthTransform = getDepthTextureTransform();
+        std::shared_ptr<VROTexture> confidenceTexture = getDepthConfidenceTexture();
+
+        // Sample depth at hit point for each result
+        for (auto& vResult : vResults) {
+            // Transform screen point to depth texture UV
+            // pointViewport is already in normalized screen space (0-1)
+            VROVector3f screenPoint(pointViewport.x, pointViewport.y, 0.0f);
+            VROVector3f depthUV = depthTransform.multiply(screenPoint);
+
+            // Sample depth texture at UV
+            float depthValue = sampleDepthTextureAtUV(depthTexture, depthUV.x, depthUV.y);
+
+            // Sample confidence if available
+            float confidence = -1.0f;
+            if (confidenceTexture && depthSource == "lidar") {
+                confidence = sampleDepthTextureAtUV(confidenceTexture, depthUV.x, depthUV.y);
+            }
+
+            // Set depth data on result if valid
+            if (depthValue > 0.0f) {
+                vResult->setDepthData(depthValue, confidence, depthSource);
+
+                // Upgrade result type to DepthPoint when depth data is available
+                // For LiDAR: Use confidence threshold of > 0.3 (lowered for better detection)
+                // For Monocular: Always upgrade when depth available
+                bool shouldUpgradeToDepthPoint = false;
+                if (depthSource == "lidar") {
+                    // LiDAR: Upgrade if confidence is unavailable or > 0.3
+                    shouldUpgradeToDepthPoint = (confidence < 0.0f || confidence > 0.3f);
+                    pinfo("LiDAR depth: %.2fm, confidence: %.2f, upgrading: %s",
+                          depthValue, confidence, shouldUpgradeToDepthPoint ? "YES" : "NO");
+                } else if (depthSource == "monocular") {
+                    // Monocular: Always use depth data when available
+                    shouldUpgradeToDepthPoint = true;
+                    pinfo("Monocular depth: %.2fm, upgrading to DepthPoint", depthValue);
+                }
+
+                if (shouldUpgradeToDepthPoint) {
+                    pinfo("Upgrading hit result to DepthPoint type");
+                    vResult->setType(VROARHitTestResultType::DepthPoint);
+                } else {
+                    pinfo("Keeping original type, depth confidence too low");
+                }
+            }
+        }
+    } else {
+        if (!depthTexture) {
+            pwarn("No depth texture available for hit test enhancement");
+        } else if (!hasDepthData()) {
+            pwarn("Frame reports no depth data available");
+        }
+    }
+
     return vResults;
 }
 
@@ -395,32 +463,111 @@ std::shared_ptr<VROTexture> VROARFrameiOS::getDepthConfidenceTexture() {
 
 VROMatrix4f VROARFrameiOS::getDepthTextureTransform() const {
     /*
-     For 3D objects, we calculate screen-space UV from gl_FragCoord.xy / viewport_size.
-     This gives us normalized screen coordinates (0,0 at bottom-left, 1,1 at top-right).
+     ARKit's displayTransformForOrientation maps FROM camera image (normalized) TO screen.
+     We need the inverse: FROM screen UV TO depth texture UV.
 
-     The depth texture from ARKit's sceneDepth is in camera sensor space, which may be
-     rotated/flipped relative to the screen based on device orientation.
-
-     ARKit's displayTransformForOrientation maps FROM camera sensor coordinates TO screen
-     display coordinates. We need the inverse: mapping FROM screen UV TO depth texture UV.
-
-     This is the same transform we use for the camera background texture coordinates
-     (getTexcoordTransform), since both the camera image and depth texture are in the
-     same sensor coordinate space.
+     For LiDAR: depth map matches camera image space, so the ARKit inverse is sufficient.
+     For monocular: depth texture is 518x518 (ScaleFill crop of camera image), so we
+     need to compose the ARKit inverse with a crop correction.
      */
     UIInterfaceOrientation orientation = VROConvert::toDeviceOrientation(_orientation);
-    CGSize viewportSize = CGSizeMake(_viewport.getWidth(), _viewport.getHeight());
+    CGSize viewportSize = CGSizeMake(_viewport.getWidth()  / _viewport.getContentScaleFactor(),
+                                     _viewport.getHeight() / _viewport.getContentScaleFactor());
 
-    // Get the inverse of displayTransform to map from screen coordinates to texture coordinates
-    CGAffineTransform transform = CGAffineTransformInvert([_frame displayTransformForOrientation:orientation viewportSize:viewportSize]);
+    CGAffineTransform arkitInverse = CGAffineTransformInvert(
+        [_frame displayTransformForOrientation:orientation viewportSize:viewportSize]);
+
+    // Check if monocular depth is active
+    std::shared_ptr<VROARSessioniOS> session = _session.lock();
+    bool isMonocular = session && session->isPreferMonocularDepth();
+    if (!isMonocular) {
+        // Also check: no LiDAR but monocular available
+        if (@available(iOS 14.0, *)) {
+            isMonocular = (_frame.sceneDepth == nil) && session &&
+                          session->getMonocularDepthEstimator() != nullptr;
+        }
+    }
+
+    CGAffineTransform finalTransform = arkitInverse;
+
+    if (isMonocular) {
+        /*
+         Monocular depth texture transform: screenUV → depth texture UV.
+
+         The monocular depth buffer is in PORTRAIT orientation because Vision applies
+         kCGImagePropertyOrientationRight (90° CW rotation) before feeding the model.
+         LiDAR depth is in landscape camera space.
+
+         Chain: screenUV → arkitInverse → landscape camera UV → portrait UV → ScaleFill crop → depth texture UV
+
+         Step 1: arkitInverse gives landscape camera UV (same as LiDAR)
+         Step 2: Landscape → Portrait (90° CW rotation): portrait_u = 1 - landscape_v, portrait_v = landscape_u
+         Step 3: ScaleFill center-crop correction on portrait_v (model crops tall portrait to square)
+         */
+
+        // Get arkitInverse components
+        float ai_a = arkitInverse.a, ai_b = arkitInverse.b;
+        float ai_c = arkitInverse.c, ai_d = arkitInverse.d;
+        float ai_tx = arkitInverse.tx, ai_ty = arkitInverse.ty;
+        // landscape_u = ai_a * sx + ai_c * sy + ai_tx
+        // landscape_v = ai_b * sx + ai_d * sy + ai_ty
+
+        // Step 2: portrait_u = 1 - landscape_v, portrait_v = landscape_u
+        // portrait_u = -ai_b * sx - ai_d * sy + (1 - ai_ty)
+        // portrait_v = ai_a * sx + ai_c * sy + ai_tx
+
+        // Step 3: ScaleFill crop correction
+        // Portrait image: camLandscapeH x camLandscapeW (e.g. 2160 x 3840)
+        // Model input: depthW x depthH (e.g. 518 x 518)
+        CGSize imageRes = _frame.camera.imageResolution;
+        float portraitW = imageRes.height;  // 2160
+        float portraitH = imageRes.width;   // 3840
+
+        int depthW = 518, depthH = 518;
+        if (session) {
+            auto est = session->getMonocularDepthEstimator();
+            if (est) {
+                depthW = est->getDepthBufferWidth();
+                depthH = est->getDepthBufferHeight();
+                if (depthW <= 0 || depthH <= 0) { depthW = 518; depthH = 518; }
+            }
+        }
+
+        float scale = std::max((float)depthW / portraitW, (float)depthH / portraitH);
+        float scaledW = portraitW * scale;
+        float scaledH = portraitH * scale;
+        float cropU = (scaledW - depthW) / (2.0f * scaledW);  // crop in portrait u (should be ~0)
+        float cropV = (scaledH - depthH) / (2.0f * scaledH);  // crop in portrait v (~0.219)
+        float visU = 1.0f - 2.0f * cropU;
+        float visV = 1.0f - 2.0f * cropV;
+
+        // depth_u = (portrait_u - cropU) / visU
+        // depth_v = (portrait_v - cropV) / visV
+        float du_sx = -ai_b / visU;
+        float du_sy = -ai_d / visU;
+        float du_c  = (1.0f - ai_ty - cropU) / visU;
+
+        float dv_sx = ai_a / visV;
+        float dv_sy = ai_c / visV;
+        float dv_c  = (ai_tx - cropV) / visV;
+
+        VROMatrix4f matrix;
+        matrix[0]  = du_sx;    // col 0, row 0
+        matrix[1]  = dv_sx;    // col 0, row 1
+        matrix[4]  = du_sy;    // col 1, row 0
+        matrix[5]  = dv_sy;    // col 1, row 1
+        matrix[12] = du_c;     // tx
+        matrix[13] = dv_c;     // ty
+        return matrix;
+    }
 
     VROMatrix4f matrix;
-    matrix[0] = transform.a;
-    matrix[1] = transform.b;
-    matrix[4] = transform.c;
-    matrix[5] = transform.d;
-    matrix[12] = transform.tx;
-    matrix[13] = transform.ty;
+    matrix[0] = finalTransform.a;
+    matrix[1] = finalTransform.b;
+    matrix[4] = finalTransform.c;
+    matrix[5] = finalTransform.d;
+    matrix[12] = finalTransform.tx;
+    matrix[13] = finalTransform.ty;
     return matrix;
 }
 
@@ -675,6 +822,76 @@ std::shared_ptr<VROARDepthMesh> VROARFrameiOS::generateDepthMesh(
     }
 
     return nullptr;
+}
+
+float VROARFrameiOS::sampleDepthTextureAtUV(std::shared_ptr<VROTexture> texture, float u, float v) const {
+    if (!texture) {
+        return 0.0f;
+    }
+
+    // Clamp UV coordinates to valid range
+    u = std::max(0.0f, std::min(1.0f, u));
+    v = std::max(0.0f, std::min(1.0f, v));
+
+    // For iOS depth textures, we need to access the underlying CVPixelBuffer
+    // Check if this is a LiDAR depth texture
+    if (@available(iOS 14.0, *)) {
+        if (_frame.sceneDepth && _frame.sceneDepth.depthMap) {
+            CVPixelBufferRef depthMap = _frame.sceneDepth.depthMap;
+            CVPixelBufferLockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly);
+
+            size_t width = CVPixelBufferGetWidth(depthMap);
+            size_t height = CVPixelBufferGetHeight(depthMap);
+            Float32 *depthData = (Float32 *)CVPixelBufferGetBaseAddress(depthMap);
+
+            if (depthData) {
+                // Convert UV to pixel coordinates
+                int x = static_cast<int>(u * (width - 1));
+                int y = static_cast<int>(v * (height - 1));
+
+                // Clamp to valid pixel range
+                x = std::max(0, std::min(static_cast<int>(width - 1), x));
+                y = std::max(0, std::min(static_cast<int>(height - 1), y));
+
+                float depth = depthData[y * width + x];
+
+                CVPixelBufferUnlockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly);
+                return depth;
+            }
+
+            CVPixelBufferUnlockBaseAddress(depthMap, kCVPixelBufferLock_ReadOnly);
+        }
+    }
+
+    // Fallback: Try to sample from monocular depth texture
+    std::shared_ptr<VROARSessioniOS> session = _session.lock();
+    if (session) {
+        auto depthEstimator = session->getMonocularDepthEstimator();
+        if (depthEstimator && depthEstimator->isAvailable()) {
+            std::shared_ptr<VROTexture> monoDepth = depthEstimator->getDepthTexture();
+            if (monoDepth && monoDepth == texture) {
+                // Access CPU-side depth buffer
+                const float* depthData = depthEstimator->getDepthBufferData();
+                int width = depthEstimator->getDepthBufferWidth();
+                int height = depthEstimator->getDepthBufferHeight();
+
+                if (depthData && width > 0 && height > 0) {
+                    // Convert UV to pixel coordinates
+                    int x = static_cast<int>(u * (width - 1));
+                    int y = static_cast<int>(v * (height - 1));
+
+                    // Clamp to valid pixel range
+                    x = std::max(0, std::min(width - 1, x));
+                    y = std::max(0, std::min(height - 1, y));
+
+                    // Sample depth buffer (row-major storage)
+                    return depthData[y * width + x];
+                }
+            }
+        }
+    }
+
+    return 0.0f;
 }
 
 #endif

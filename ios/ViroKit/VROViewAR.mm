@@ -26,6 +26,7 @@
 
 #import "VROViewAR.h"
 #import "VRORenderer.h"
+#include "VROARFrameiOS.h"
 #import "VROARSceneController.h"
 #import "VRORenderDelegateiOS.h"
 #import "VROTime.h"
@@ -48,7 +49,6 @@
 #import "VROViewRecorder.h"
 #import "VROARCameraInertial.h"
 #import "VRODeviceUtil.h"
-#import "VROModelDownloader.h"
 #import "VROCameraTexture.h"
 #import "VROShaderFactory.h"
 #import "VROShaderModifier.h"
@@ -128,6 +128,8 @@ struct VROScanWaveConfig {
     bool _depthDebugModifierAdded;
     bool _depthDebugEnabled;
     float _depthDebugOpacity;
+    VROMatrix4f _depthTextureTransform;
+    VROViewport _currentViewport;
 
     // Scan wave effect state
     VROScanWaveConfig _scanWaveConfig;
@@ -138,10 +140,10 @@ struct VROScanWaveConfig {
     double _scanWaveStartTime;
 
     // Scan wave looping state
-    int _scanWaveRepeatCount;        // 0 = use totalDuration only. Default: 1
-    float _scanWaveTotalDuration;    // seconds. 0 = use repeatCount only.
-    int _scanWaveCurrentLoop;        // current loop index (0-based)
-    double _scanWaveLoopStartTime;   // start of current loop iteration (ms)
+    int _scanWaveRepeatCount;
+    float _scanWaveTotalDuration;
+    int _scanWaveCurrentLoop;
+    double _scanWaveLoopStartTime;
 }
 
 @property (readwrite, nonatomic) VROTrackingType trackingType;
@@ -975,6 +977,7 @@ struct VROScanWaveConfig {
     } else {
         viewport = _viewport;
     }
+    _currentViewport = viewport;
     
     /*
      Attempt to initialize the ARSession if we have not yet done so.
@@ -1110,23 +1113,55 @@ struct VROScanWaveConfig {
     VROOcclusionMode occlusionMode = _arSession->getOcclusionMode();
     std::shared_ptr<VROTexture> depthTexture = nullptr;
     VROMatrix4f depthTextureTransform = VROMatrix4f::identity();
-    if (occlusionMode != VROOcclusionMode::Disabled && frame->hasDepthData()) {
-        depthTexture = frame->getDepthTexture();
-        depthTextureTransform = frame->getDepthTextureTransform();
 
-        // Ensure the depth texture is uploaded to GPU before rendering
-        if (depthTexture && !depthTexture->isHydrated()) {
-            depthTexture->prewarm(_driver);
+    // Check if we have any depth texture (LiDAR or Monocular)
+    // Note: frame->hasDepthData() only checks for LiDAR, so we explicitly try getDepthTexture()
+    if (occlusionMode != VROOcclusionMode::Disabled) {
+        depthTexture = frame->getDepthTexture();
+        if (depthTexture) {
+            depthTextureTransform = frame->getDepthTextureTransform();
+
+            // Ensure the depth texture is uploaded to GPU before rendering
+            if (!depthTexture->isHydrated()) {
+                depthTexture->prewarm(_driver);
+            }
+
         }
     }
+
+    // Store for debug modifier uniform binders
+    _depthTextureTransform = depthTextureTransform;
+
+    // CRITICAL: Set occlusion info on the render context BEFORE prepareFrame
+    // so that shader capability keys include arOcclusion during scene traversal.
+    _renderer->setOcclusionMode(occlusionMode);
+    _renderer->setDepthTexture(depthTexture);
+    _renderer->setDepthTextureTransform(depthTextureTransform);
 
     _pointOfView->getCamera()->setPosition(position);
     _renderer->prepareFrame(_frame, viewport, fov, rotation, projection, _driver);
 
-    // Set occlusion info on the render context for 3D object occlusion
-    _renderer->setOcclusionMode(occlusionMode);
-    _renderer->setDepthTexture(depthTexture);
-    _renderer->setDepthTextureTransform(depthTextureTransform);
+    static int occDebugCounter = 0;
+    if (occDebugCounter++ % 60 == 0) {
+        NSLog(@"[VIRO_OCC_DEBUG] occlusionMode=%d, depthTexture=%p, hydrated=%d",
+              (int)occlusionMode, depthTexture.get(),
+              depthTexture ? depthTexture->isHydrated() : -1);
+        if (depthTexture) {
+            NSLog(@"[VIRO_OCC_DEBUG] depthTexture size=%dx%d", depthTexture->getWidth(), depthTexture->getHeight());
+            NSLog(@"[VIRO_OCC_DEBUG] transform: [%.3f, %.3f, 0, 0]", depthTextureTransform[0], depthTextureTransform[1]);
+            NSLog(@"[VIRO_OCC_DEBUG]           [%.3f, %.3f, 0, 0]", depthTextureTransform[4], depthTextureTransform[5]);
+            NSLog(@"[VIRO_OCC_DEBUG]           tx=%.3f, ty=%.3f", depthTextureTransform[12], depthTextureTransform[13]);
+            NSLog(@"[VIRO_OCC_DEBUG] viewport=%dx%d", viewport.getWidth(), viewport.getHeight());
+            // Log camera image dimensions to verify crop calculation
+            const VROARFrameiOS *frameiOS = dynamic_cast<const VROARFrameiOS *>(frame.get());
+            if (frameiOS) {
+                CVPixelBufferRef camImg = frameiOS->getImage();
+                if (camImg) {
+                    NSLog(@"[VIRO_OCC_DEBUG] camImage=%zux%zu", CVPixelBufferGetWidth(camImg), CVPixelBufferGetHeight(camImg));
+                }
+            }
+        }
+    }
 
     _renderer->renderEye(VROEyeType::Monocular, _renderer->getLookAtMatrix(), projection, viewport, _driver);
     _renderer->renderHUD(VROEyeType::Monocular, VROMatrix4f::identity(), projection, _driver);
@@ -1152,8 +1187,8 @@ struct VROScanWaveConfig {
     // Check if we have depth data available for debug visualization
     // NOTE: Occlusion is now handled on 3D objects via the shader factory, not on the background.
     // The background camera image should NOT write to the depth buffer.
-    bool hasDepth = frame->hasDepthData();
-    std::shared_ptr<VROTexture> depthTexture = hasDepth ? frame->getDepthTexture() : nullptr;
+    std::shared_ptr<VROTexture> depthTexture = frame->getDepthTexture();
+    bool hasDepth = (depthTexture != nullptr);
 
     // Only add depth debug visualization if enabled and depth data is available
     bool needsDebugVisualization = _depthDebugEnabled && depthTexture;
@@ -1164,9 +1199,8 @@ struct VROScanWaveConfig {
             depthTexture->prewarm(_driver);
         }
 
-        // Set the depth texture on the material for the debug modifier
-        material->getAmbientOcclusion().setTexture(depthTexture);
-        material->updateSubstrateTextures();
+        // Debug modifier now uses ar_occlusion_depth_texture (global ARDepthMap binding)
+        // No need to set depth texture on the material's AO slot.
 
         // Add the debug modifier if not already added
         if (!_depthDebugModifierAdded) {
@@ -1181,6 +1215,27 @@ struct VROScanWaveConfig {
                         uniform->setFloat(strongSelf->_depthDebugEnabled ? strongSelf->_depthDebugOpacity : 0.0f);
                     } else {
                         uniform->setFloat(0.0f);
+                    }
+                });
+
+            // Bind viewport size and depth transform directly on the modifier.
+            // These are normally bound by bindOcclusionUniforms via the render context,
+            // but the camera background may not go through that path reliably.
+            _depthDebugModifier->setUniformBinder("ar_viewport_size", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *strongSelf = weakSelf;
+                    if (strongSelf) {
+                        VROVector3f size((float)strongSelf->_currentViewport.getWidth(),
+                                        (float)strongSelf->_currentViewport.getHeight(), 0.0f);
+                        uniform->setVec3(size);
+                    }
+                });
+
+            _depthDebugModifier->setUniformBinder("ar_depth_texture_transform", VROShaderProperty::Mat4,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *strongSelf = weakSelf;
+                    if (strongSelf) {
+                        uniform->setMat4(strongSelf->_depthTextureTransform);
                     }
                 });
 
@@ -1635,55 +1690,17 @@ struct VROScanWaveConfig {
     return NO;
 }
 
-- (BOOL)isMonocularDepthModelDownloaded {
-    return [VROModelDownloader isModelDownloaded:@"DepthPro"];
-}
-
-- (void)setMonocularDepthModelURL:(NSURL *)baseURL {
-    if (self.trackingType == VROTrackingType::DOF6) {
-        std::shared_ptr<VROARSessioniOS> sessioniOS =
-            std::dynamic_pointer_cast<VROARSessioniOS>(_arSession);
-        if (sessioniOS) {
-            sessioniOS->setMonocularDepthModelURL(baseURL);
-        }
+- (BOOL)isMonocularDepthModelAvailable {
+    // Check framework bundle first (model bundled in ViroKit)
+    NSBundle *frameworkBundle = [NSBundle bundleForClass:[VROViewAR class]];
+    NSString *bundledPath = [frameworkBundle pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+    
+    // Fallback to main app bundle (for custom deployments)
+    if (!bundledPath) {
+        bundledPath = [[NSBundle mainBundle] pathForResource:@"DepthPro" ofType:@"mlmodelc"];
     }
-}
-
-- (void)downloadMonocularDepthModelWithProgress:(void (^)(float progress))progressBlock
-                                     completion:(void (^)(BOOL success, NSError *error))completionBlock {
-    // Check if already downloaded
-    if ([VROModelDownloader isModelDownloaded:@"DepthPro"]) {
-        if (completionBlock) {
-            completionBlock(YES, nil);
-        }
-        return;
-    }
-
-    // Get the model URL from session
-    NSURL *baseURL = nil;
-    if (self.trackingType == VROTrackingType::DOF6) {
-        // TODO: Get URL from session or use a default
-        // For now, caller must set URL first via setMonocularDepthModelURL
-    }
-
-    if (!baseURL) {
-        if (completionBlock) {
-            NSError *error = [NSError errorWithDomain:@"com.viro.viewar"
-                                                 code:1
-                                             userInfo:@{NSLocalizedDescriptionKey: @"No model URL configured. Call setMonocularDepthModelURL first."}];
-            completionBlock(NO, error);
-        }
-        return;
-    }
-
-    [VROModelDownloader downloadModelIfNeeded:@"DepthPro"
-                                      fromURL:baseURL
-                                     progress:progressBlock
-                                   completion:^(NSString *localPath, NSError *error) {
-        if (completionBlock) {
-            completionBlock(localPath != nil, error);
-        }
-    }];
+    
+    return bundledPath != nil;
 }
 
 - (void)setPreferMonocularDepth:(BOOL)prefer {
