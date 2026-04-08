@@ -106,6 +106,8 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameARCore::hitTest(int x
             } else {
                 type = VROARHitTestResultType::EstimatedHorizontalPlane;
             }
+        } else if (trackable != nullptr && trackable->getType() == arcore::TrackableType::DepthPoint) {
+            type = VROARHitTestResultType::DepthPoint;
         } else {
             type = VROARHitTestResultType::FeaturePoint;
         }
@@ -122,6 +124,14 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameARCore::hitTest(int x
         std::shared_ptr<VROARHitTestResult> vResult = std::make_shared<VROARHitTestResultARCore>(type, distance, hitResult,
                                                                                                  worldTransform, localTransform,
                                                                                                  session);
+
+        // For depth points, add depth data from the hit result
+        if (type == VROARHitTestResultType::DepthPoint) {
+            // ARCore depth points use the distance as the depth value
+            // Confidence is not provided by ARCore depth API
+            vResult->setDepthData(distance, -1.0f, "arcore");
+        }
+
         toReturn.push_back(vResult);
         delete (pose);
         delete (trackable);
@@ -171,6 +181,8 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameARCore::hitTestRay(VR
             } else {
                 type = VROARHitTestResultType::EstimatedHorizontalPlane;
             }
+        } else if (trackable != nullptr && trackable->getType() == arcore::TrackableType::DepthPoint) {
+            type = VROARHitTestResultType::DepthPoint;
         } else {
             type = VROARHitTestResultType::FeaturePoint;
         }
@@ -187,6 +199,14 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameARCore::hitTestRay(VR
         std::shared_ptr<VROARHitTestResult> vResult = std::make_shared<VROARHitTestResultARCore>(type, distance, hitResult,
                                                                                                  worldTransform, localTransform,
                                                                                                  session);
+
+        // For depth points, add depth data from the hit result
+        if (type == VROARHitTestResultType::DepthPoint) {
+            // ARCore depth points use the distance as the depth value
+            // Confidence is not provided by ARCore depth API
+            vResult->setDepthData(distance, -1.0f, "arcore");
+        }
+
         toReturn.push_back(vResult);
         delete (pose);
         delete (trackable);
@@ -196,7 +216,36 @@ std::vector<std::shared_ptr<VROARHitTestResult>> VROARFrameARCore::hitTestRay(VR
     return toReturn;
 }
 VROMatrix4f VROARFrameARCore::getViewportToCameraImageTransform() const {
-    pabort("Not supported on ARCore");
+    std::shared_ptr<VROARSessionARCore> session = _session.lock();
+    if (!session) {
+        return VROMatrix4f();  // identity
+    }
+
+    // ARCore background texcoords: camera-image UVs at 4 viewport corners.
+    // Layout from arcore::Frame::getBackgroundTexcoords:
+    //   [0,1] = BL (screen 0,0),  [2,3] = TL (screen 0,1),
+    //   [4,5] = BR (screen 1,0),  [6,7] = TR (screen 1,1)
+    float tc[8] = {};
+    _frame->getBackgroundTexcoords(tc);
+    float blX = tc[0], blY = tc[1];
+    float tlX = tc[2], tlY = tc[3];
+    float brX = tc[4], brY = tc[5];
+
+    // Build affine transform M : viewport-UV [0,1]^2  ->  camera-image UV
+    //   M * (0,0,0,1)^T = (blX, blY, 0, 1)  (translation)
+    //   M * (1,0,0,1)^T = (brX, brY, 0, 1)  (x-basis = BR - BL)
+    //   M * (0,1,0,1)^T = (tlX, tlY, 0, 1)  (y-basis = TL - BL)
+    //
+    // VROMatrix4f uses column-major storage (same as iOS / OpenGL convention):
+    //   indices [0..3]  = col 0,  [4..7] = col 1,  [12..15] = col 3
+    VROMatrix4f matrix;          // initialised to identity by default ctor
+    matrix[0]  = brX - blX;     // col0 row0 — cam-u per screen-x
+    matrix[1]  = brY - blY;     // col0 row1 — cam-v per screen-x
+    matrix[4]  = tlX - blX;     // col1 row0 — cam-u per screen-y
+    matrix[5]  = tlY - blY;     // col1 row1 — cam-v per screen-y
+    matrix[12] = blX;            // col3 row0 — cam-u at screen origin
+    matrix[13] = blY;            // col3 row1 — cam-v at screen origin
+    return matrix;
 }
 
 bool VROARFrameARCore::hasDisplayGeometryChanged() {
@@ -271,6 +320,30 @@ VROVector3f VROARFrameARCore::getAmbientLightColor() const {
     return VROLight::convertGammaToLinear(gammaColor);
 }
 
+bool VROARFrameARCore::getCameraImageY(const uint8_t** data, int* width, int* height) {
+    if (!_lumaData.empty()) {
+        *data = _lumaData.data(); *width = _lumaW; *height = _lumaH;
+        return true;
+    }
+    arcore::Image* img = nullptr;
+    auto status = _frame->acquireCameraImage(&img);
+    if (status != arcore::ImageRetrievalStatus::Success || !img) return false;
+    int w = img->getWidth(), h = img->getHeight();
+    int stride = img->getPlaneRowStride(0);
+    const uint8_t* src = nullptr; int len = 0;
+    img->getPlaneData(0, &src, &len);
+    if (src && w > 0 && h > 0) {
+        _lumaW = w; _lumaH = h;
+        _lumaData.resize(w * h);
+        for (int row = 0; row < h; ++row)
+            memcpy(_lumaData.data() + row * w, src + row * stride, w);
+    }
+    delete img;
+    if (_lumaData.empty()) return false;
+    *data = _lumaData.data(); *width = _lumaW; *height = _lumaH;
+    return true;
+}
+
 std::shared_ptr<VROARPointCloud> VROARFrameARCore::getPointCloud() {
     if (_pointCloud) {
         return _pointCloud;
@@ -297,13 +370,10 @@ std::shared_ptr<VROARPointCloud> VROARFrameARCore::getPointCloud() {
             if (pointsArray[i * 4 + 3] > .1) {
                 VROVector4f point = VROVector4f(pointsArray[i * 4 + 0], pointsArray[i * 4 + 1],
                                                 pointsArray[i * 4 + 2], pointsArray[i * 4 + 3]);
-                if(pointsIdArray != NULL) {
-                    int pointId = pointsIdArray[i];
-                    points.push_back(point);
-                    //TODO: Does android return negative points ids? If not, this cast to uint64 shouldn't
-                    //be a problem.
-                    identifiers.push_back((uint64_t) pointId);
-                }
+                points.push_back(point);
+                // Use the ARCore point ID when available; fall back to loop index so the
+                // identifiers vector always stays in sync with points (required by VROARPointCloud).
+                identifiers.push_back(pointsIdArray ? (uint64_t) pointsIdArray[i] : (uint64_t) i);
             }
         }
         delete (pointCloud);

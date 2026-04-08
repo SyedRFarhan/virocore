@@ -38,6 +38,8 @@
 #include "VROStringUtil.h"
 #include "VRODriverOpenGL.h"
 #include <atomic>
+#include <set>
+#include <sstream>
 
 #define kDebugShaders 0
 
@@ -415,7 +417,14 @@ void VROShaderProgram::findUniformLocations() {
     for (std::string &samplerName : _samplers) {
         int location = GL( glGetUniformLocation(_program, samplerName.c_str()) );
         GL( glUniform1i(location, samplerIdx) );
-        
+
+        ++samplerIdx;
+    }
+
+    // Assign texture units to modifier-declared samplers, continuing from where _samplers left off.
+    for (const std::string &samplerName : _modifierSamplers) {
+        int location = GL( glGetUniformLocation(_program, samplerName.c_str()) );
+        GL( glUniform1i(location, samplerIdx) );
         ++samplerIdx;
     }
 }
@@ -423,7 +432,7 @@ void VROShaderProgram::findUniformLocations() {
 void VROShaderProgram::addModifierUniforms() {
     for (const std::shared_ptr<VROShaderModifier> &modifier : _modifiers) {
         std::vector<std::string> uniformNames = modifier->getUniforms();
-        
+
         for (std::string &uniformName : uniformNames) {
             VROUniformBinder *binder = modifier->getUniformBinder(uniformName);
             if (binder != nullptr) {
@@ -431,6 +440,129 @@ void VROShaderProgram::addModifierUniforms() {
                 _uniforms.push_back(uniform);
             }
         }
+
+        // Parse custom shader uniforms from the uniform declarations
+        std::string uniformsSource = modifier->getUniformsSource();
+        parseCustomUniforms(uniformsSource);
+    }
+}
+
+void VROShaderProgram::parseCustomUniforms(const std::string &uniformsSource) {
+    // Parse uniform declarations like "uniform highp float time;"
+    std::istringstream stream(uniformsSource);
+    std::string line;
+
+    while (std::getline(stream, line)) {
+        // Trim whitespace
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) continue;
+        line = line.substr(start);
+
+        // Check if it's a uniform declaration
+        if (!VROStringUtil::startsWith(line, "uniform ")) {
+            continue;
+        }
+
+        // Parse: "uniform highp float time;" or "uniform sampler2D tex;"
+        // Format: uniform [precision] type name;
+        std::istringstream lineStream(line);
+        std::string token, precision, type, name;
+
+        lineStream >> token; // "uniform"
+        lineStream >> precision; // might be precision qualifier or type
+        lineStream >> type; // might be name if no precision
+
+        // If we got 3 tokens, precision is actually the type
+        if (type.empty() || type == ";") {
+            type = precision;
+            precision = "";
+        } else {
+            lineStream >> name;
+        }
+
+        // If name is empty, this was a 3-token declaration: "uniform <type> <name>;"
+        // e.g. "uniform mat4 camera_image_transform;" parsed as precision="mat4", type="name;"
+        // In this case precision IS the real type, and type IS the name.
+        if (name.empty()) {
+            name = type;   // type slot holds the name
+            type = precision; // precision slot holds the real GLSL type
+            precision = "";
+        }
+
+        // Clean up name (remove semicolon)
+        size_t semicolon = name.find(';');
+        if (semicolon != std::string::npos) {
+            name = name.substr(0, semicolon);
+        }
+
+        if (name.empty() || type.empty()) {
+            continue;
+        }
+
+        // Collect modifier-declared samplers so they can be assigned texture units.
+        // They are NOT added to _uniforms (GL handles them via glUniform1i like _samplers).
+        // Check both `type` and `precision` because the parser may place the sampler type in
+        // either slot depending on whether a precision qualifier is present:
+        //   "uniform highp sampler2D x;" → type="sampler2D"
+        //   "uniform sampler2D x;"       → precision="sampler2D", type="x;"
+        if (VROStringUtil::startsWith(type, "sampler") || VROStringUtil::startsWith(precision, "sampler")) {
+            // Skip if already in the standard sampler list (_samplers); it is handled there
+            // and adding it again to _modifierSamplers would cause double texture-unit assignment
+            // and a null dereference in loadTextures / hashTextures.
+            bool isStandardSampler = false;
+            for (const std::string &s : _samplers) {
+                if (s == name) { isStandardSampler = true; break; }
+            }
+            if (isStandardSampler) {
+                continue;
+            }
+            bool samplerExists = false;
+            for (const std::string &existing : _modifierSamplers) {
+                if (existing == name) { samplerExists = true; break; }
+            }
+            if (!samplerExists) {
+                _modifierSamplers.push_back(name);
+            }
+            continue;
+        }
+
+        // Check if this uniform already exists (from binders)
+        bool exists = false;
+        for (VROUniform *uniform : _uniforms) {
+            if (uniform->getName() == name) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) {
+            continue;
+        }
+
+        // Determine type
+        VROShaderProperty shaderType;
+        if (type == "float") {
+            shaderType = VROShaderProperty::Float;
+        } else if (type == "vec2") {
+            shaderType = VROShaderProperty::Vec2;
+        } else if (type == "vec3") {
+            shaderType = VROShaderProperty::Vec3;
+        } else if (type == "vec4") {
+            shaderType = VROShaderProperty::Vec4;
+        } else if (type == "int") {
+            shaderType = VROShaderProperty::Int;
+        } else if (type == "mat4") {
+            shaderType = VROShaderProperty::Mat4;
+        } else if (type == "mat3") {
+            shaderType = VROShaderProperty::Mat3;
+        } else if (type == "mat2") {
+            shaderType = VROShaderProperty::Mat2;
+        } else {
+            // Unknown type, skip
+            continue;
+        }
+
+        VROUniform *uniform = VROUniform::newUniformForType(name, shaderType, 1);
+        _uniforms.push_back(uniform);
     }
 }
 
@@ -520,14 +652,14 @@ void VROShaderProgram::addStandardUniforms() {
     addUniform(VROShaderProperty::Vec4, 1, "material_diffuse_surface_color");
     addUniform(VROShaderProperty::Float, 1, "material_diffuse_intensity");
     addUniform(VROShaderProperty::Float, 1, "material_alpha");
-    addUniform(VROShaderProperty::Float, 1, "material_alpha_cutoff");
     addUniform(VROShaderProperty::Float, 1, "material_shininess");
-    
+
     addUniform(VROShaderProperty::Float, 1, "material_roughness");
     addUniform(VROShaderProperty::Float, 1, "material_roughness_intensity");
     addUniform(VROShaderProperty::Float, 1, "material_metalness");
     addUniform(VROShaderProperty::Float, 1, "material_metalness_intensity");
     addUniform(VROShaderProperty::Float, 1, "material_ao");
+    addUniform(VROShaderProperty::Float, 1, "material_alpha_cutoff");
     addUniform(VROShaderProperty::Vec3, 1, "material_emissive_color");
     addUniform(VROShaderProperty::Mat4, 1, "material_diffuse_contents_transform");
 
@@ -537,6 +669,9 @@ void VROShaderProgram::addStandardUniforms() {
     addUniform(VROShaderProperty::Mat4, 1, "ar_depth_texture_transform");
     addUniform(VROShaderProperty::Float, 1, "occlusion_z_near");
     addUniform(VROShaderProperty::Float, 1, "occlusion_z_far");
+
+    // AR Semantic uniforms (used by semantic mask modifier, independent of depth occlusion)
+    addUniform(VROShaderProperty::Mat4, 1, "ar_semantic_texture_transform");
 }
 
 #pragma mark - Source Inflation and Shader Modifiers
@@ -579,17 +714,38 @@ void VROShaderProgram::inject(const std::string &directive, const std::string &c
 
 void VROShaderProgram::inflateVertexShaderModifiers(const std::vector<std::shared_ptr<VROShaderModifier>> &modifiers,
                                                     std::string &source) {
-    
-    for (const std::shared_ptr<VROShaderModifier> &modifier : modifiers) {
+    std::vector<std::shared_ptr<VROShaderModifier>> sorted(modifiers);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const std::shared_ptr<VROShaderModifier> &a,
+                                                      const std::shared_ptr<VROShaderModifier> &b) {
+        return a->getPriority() < b->getPriority();
+    });
+
+    // Collect unique varying declarations from all modifiers and inject as 'out' in the vertex shader.
+    {
+        std::set<std::string> seen;
+        std::string varyingDecls;
+        for (const std::shared_ptr<VROShaderModifier> &modifier : sorted) {
+            for (const std::string &varying : modifier->getVaryings()) {
+                if (seen.insert(varying).second) {
+                    varyingDecls += "out " + varying + ";\n";
+                }
+            }
+        }
+        if (!varyingDecls.empty()) {
+            insertModifier(varyingDecls, "#pragma varying_out_declarations", source);
+        }
+    }
+
+    for (const std::shared_ptr<VROShaderModifier> &modifier : sorted) {
         if (modifier->getEntryPoint() != VROShaderEntryPoint::Geometry &&
             modifier->getEntryPoint() != VROShaderEntryPoint::Vertex) {
             continue;
         }
-        
+
         insertModifier(modifier->getBodySource(), modifier->getDirective(VROShaderSection::Body), source);
         insertModifier(modifier->getUniformsSource(), modifier->getDirective(VROShaderSection::Uniforms), source);
         inflateReplacements(modifier->getReplacements(), source);
-        
+
         if (!modifier->getName().empty()) {
             _shaderName.append("_").append(modifier->getName());
         }
@@ -598,8 +754,29 @@ void VROShaderProgram::inflateVertexShaderModifiers(const std::vector<std::share
 
 void VROShaderProgram::inflateFragmentShaderModifiers(const std::vector<std::shared_ptr<VROShaderModifier>> &modifiers,
                                                       std::string &source) {
+    std::vector<std::shared_ptr<VROShaderModifier>> sorted(modifiers);
+    std::stable_sort(sorted.begin(), sorted.end(), [](const std::shared_ptr<VROShaderModifier> &a,
+                                                      const std::shared_ptr<VROShaderModifier> &b) {
+        return a->getPriority() < b->getPriority();
+    });
 
-    for (const std::shared_ptr<VROShaderModifier> &modifier : modifiers) {
+    // Collect unique varying declarations from all modifiers and inject as 'in' in the fragment shader.
+    {
+        std::set<std::string> seen;
+        std::string varyingDecls;
+        for (const std::shared_ptr<VROShaderModifier> &modifier : sorted) {
+            for (const std::string &varying : modifier->getVaryings()) {
+                if (seen.insert(varying).second) {
+                    varyingDecls += "in " + varying + ";\n";
+                }
+            }
+        }
+        if (!varyingDecls.empty()) {
+            insertModifier(varyingDecls, "#pragma varying_in_declarations", source);
+        }
+    }
+
+    for (const std::shared_ptr<VROShaderModifier> &modifier : sorted) {
         if (modifier->getEntryPoint() != VROShaderEntryPoint::Surface &&
             modifier->getEntryPoint() != VROShaderEntryPoint::LightingModel &&
             modifier->getEntryPoint() != VROShaderEntryPoint::Fragment &&
@@ -615,6 +792,54 @@ void VROShaderProgram::inflateFragmentShaderModifiers(const std::vector<std::sha
             _shaderName.append("_").append(modifier->getName());
         }
     }
+
+#ifdef VRO_PLATFORM_ANDROID
+    // On Android, camera_texture is an OES external image texture.
+    // When any modifier uses it, inject the required extension directive and
+    // replace 'sampler2D camera_texture' with 'samplerExternalOES camera_texture'
+    // so users can write platform-agnostic 'uniform sampler2D camera_texture' declarations.
+    {
+        bool needsOES = false;
+        for (const auto &modifier : sorted) {
+            if (modifier->requiresCameraTexture()) {
+                needsOES = true;
+                break;
+            }
+        }
+        if (needsOES) {
+            // Runtime check: VRO_PLATFORM_ANDROID is also defined as 1 for plain .cpp
+            // compilation units on iOS (VRODefines.h gates on __OBJC__). Query the GL
+            // extension string at runtime — on iOS it won't contain GL_OES_EGL_image_external
+            // so the injection is safely skipped.
+            const char *glExts = (const char *)glGetString(GL_EXTENSIONS);
+            const bool hasBaseOES = glExts && (strstr(glExts, "GL_OES_EGL_image_external") != nullptr);
+            if (hasBaseOES) {
+                // GLSL ES 3.0+ (#version 300 es / 310 es / 320 es) should use the _essl3 variant
+                // when available. Some drivers only expose the base extension (without _essl3);
+                // injecting the _essl3 name on such a driver causes "extension not supported"
+                // compile errors. Check the extension string explicitly and fall back to the
+                // base directive when the _essl3 variant is not listed.
+                const bool isESSL3 = source.find("#version 3") != std::string::npos;
+                std::string oesExt;
+                if (isESSL3) {
+                    const bool hasESSL3OES = strstr(glExts, "GL_OES_EGL_image_external_essl3") != nullptr;
+                    oesExt = hasESSL3OES
+                        ? "#extension GL_OES_EGL_image_external_essl3 : require\n"
+                        : "#extension GL_OES_EGL_image_external : require\n";
+                } else {
+                    oesExt = "#extension GL_OES_EGL_image_external : require\n";
+                }
+                size_t versionEnd = source.find('\n');
+                if (versionEnd != std::string::npos) {
+                    source.insert(versionEnd + 1, oesExt);
+                } else {
+                    source = oesExt + source;
+                }
+                VROStringUtil::replaceAll(source, "sampler2D camera_texture", "samplerExternalOES camera_texture");
+            }
+        }
+    }
+#endif
 }
 
 void VROShaderProgram::inflateReplacements(const std::map<std::string, std::string> &replacements, std::string &source) const {

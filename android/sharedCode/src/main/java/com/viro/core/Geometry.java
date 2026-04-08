@@ -228,6 +228,9 @@ public class Geometry {
      */
     //#IFDEF 'viro_react'
     public void copyAndSetMaterials(List<Material> materials) {
+        if (mNativeRef == 0) {
+            return;
+        }
         long[] materialRefs = new long[materials.size()];
         for (int i = 0; i < materials.size(); i++) {
             materialRefs[i] = materials.get(i).mNativeRef;
@@ -236,6 +239,14 @@ public class Geometry {
             }
         }
         nativeCopyAndSetMaterials(mNativeRef, materialRefs);
+    }
+
+    /**
+     * Force geometry substrate to reset. This is necessary when shader modifiers change
+     * to clear cached rendering state (especially for geometry shaders that modify vertices).
+     */
+    public void updateSubstrate() {
+        nativeUpdateSubstrate(mNativeRef);
     }
     //#ENDIF
 
@@ -248,6 +259,7 @@ public class Geometry {
     private native void nativeSetNormals(long nativeRef, float[] vertices);
     private native void nativeSetTextureCoordinates(long nativeRef, float[] vertices);
     private native void nativeSetVertexColors(long nativeRef, float[] colors);
+    private native void nativeUpdateSubstrate(long nativeRef);
 
     /**
      * Retrieve a builder for creating {@link Geometry} objects.

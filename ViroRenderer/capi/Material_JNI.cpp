@@ -29,6 +29,8 @@
 #include "VROLog.h"
 #include "VROARShadow.h"
 #include "VROShaderModifier.h"
+#include "VROMatrix4f.h"
+#include <sstream>
 
 #if VRO_PLATFORM_ANDROID
 #define VRO_METHOD(return_type, method_name) \
@@ -145,9 +147,49 @@ VROColorMask parseColorMaskArray(VRO_ENV env, VRO_STRING_ARRAY masks_j) {
     return mask;
 }
 
+VROShaderEntryPoint parseShaderEntryPoint(std::string strName) {
+    if (VROStringUtil::strcmpinsensitive(strName, "geometry")) {
+        return VROShaderEntryPoint::Geometry;
+    }
+    else if (VROStringUtil::strcmpinsensitive(strName, "vertex")) {
+        return VROShaderEntryPoint::Vertex;
+    }
+    else if (VROStringUtil::strcmpinsensitive(strName, "surface")) {
+        return VROShaderEntryPoint::Surface;
+    }
+    else if (VROStringUtil::strcmpinsensitive(strName, "fragment")) {
+        return VROShaderEntryPoint::Fragment;
+    }
+    else if (VROStringUtil::strcmpinsensitive(strName, "lightingModel")) {
+        return VROShaderEntryPoint::LightingModel;
+    }
+    else if (VROStringUtil::strcmpinsensitive(strName, "image")) {
+        return VROShaderEntryPoint::Image;
+    }
+    else {
+        // Default to Fragment if unknown
+        pwarn("Unknown shader entry point [%s], defaulting to Fragment", strName.c_str());
+        return VROShaderEntryPoint::Fragment;
+    }
+}
+
 VRO_METHOD(VRO_REF(VROMaterial), nativeCreateMaterial)(VRO_NO_ARGS) {
     std::shared_ptr<VROMaterial> materialPtr = std::make_shared<VROMaterial>();
     return VRO_REF_NEW(VROMaterial, materialPtr);
+}
+
+VRO_METHOD(VRO_REF(VROMaterial), nativeCopyMaterial)(VRO_ARGS
+                                                      VRO_REF(VROMaterial) source_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::shared_ptr<VROMaterial> source = VRO_REF_GET(VROMaterial, source_j);
+    if (!source) {
+        return 0;
+    }
+
+    // Use the C++ copy constructor which copies all properties including shader modifiers
+    std::shared_ptr<VROMaterial> copy = std::make_shared<VROMaterial>(source);
+    return VRO_REF_NEW(VROMaterial, copy);
 }
 
 VRO_METHOD(VRO_REF(VROMaterial), nativeCreateImmutableMaterial)(VRO_ARGS
@@ -419,6 +461,22 @@ VRO_METHOD(void, nativeDestroyMaterial)(VRO_ARGS
     VRO_REF_DELETE(VROMaterial, nativeRef);
 }
 
+VRO_METHOD(void, nativeSetSemanticMask)(VRO_ARGS
+                                        VRO_REF(VROMaterial) material_j,
+                                        VRO_BOOL enabled,
+                                        VRO_INT mode,
+                                        VRO_INT labelMask) {
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, enabled, mode, labelMask] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (material) {
+            material->setSemanticMaskMode(static_cast<VROSemanticMaskMode>(mode));
+            material->setSemanticLabelMask(static_cast<uint16_t>(labelMask));
+            material->setSemanticMaskEnabled(enabled);
+        }
+    });
+}
+
 VRO_METHOD(void, nativeSetShadowMode(VRO_ARGS
                                      VRO_REF(VROMaterial) material_j, VRO_STRING shadow_j)) {
     VRO_METHOD_PREAMBLE;
@@ -452,16 +510,15 @@ VRO_METHOD(void, nativeSetName(VRO_ARGS
     VRO_METHOD_PREAMBLE;
 
     std::string strName = VRO_STRING_STL(jName);
-    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, jMaterial);
+    std::shared_ptr<VROMaterial> material = VRO_REF_GET(VROMaterial, jMaterial);
 
-    VROPlatformDispatchAsyncRenderer([material_w, strName] {
-        std::shared_ptr<VROMaterial> material = material_w.lock();
-        if (!material) {
-            return;
-        }
-
+    // Set name synchronously during material initialization to avoid race conditions
+    // with shader modifiers that are also set synchronously
+    if (material) {
+        material->setThreadRestrictionEnabled(false);
         material->setName(strName);
-    });
+        material->setThreadRestrictionEnabled(true);
+    }
 }
 
 VRO_METHOD(void, nativeSetChromaKeyFilteringEnabled)(VRO_ARGS
@@ -509,35 +566,300 @@ VRO_METHOD(void, nativeSetColorWriteMask)(VRO_ARGS
 VRO_METHOD(void, nativeAddShaderModifier)(VRO_ARGS
                                           VRO_REF(VROMaterial) material_j,
                                           VRO_STRING entryPoint_j,
-                                          VRO_STRING_ARRAY codeLines_j) {
+                                          VRO_STRING shaderCode_j) {
     VRO_METHOD_PREAMBLE;
+
     std::string entryPointStr = VRO_STRING_STL(entryPoint_j);
+    std::string shaderCodeStr = VRO_STRING_STL(shaderCode_j);
 
-    VROShaderEntryPoint entryPoint = VROShaderEntryPoint::Surface;
-    if (entryPointStr == "geometry")       entryPoint = VROShaderEntryPoint::Geometry;
-    else if (entryPointStr == "vertex")    entryPoint = VROShaderEntryPoint::Vertex;
-    else if (entryPointStr == "surface")   entryPoint = VROShaderEntryPoint::Surface;
-    else if (entryPointStr == "lighting")  entryPoint = VROShaderEntryPoint::LightingModel;
-    else if (entryPointStr == "fragment")  entryPoint = VROShaderEntryPoint::Fragment;
+    VROShaderEntryPoint entryPoint = parseShaderEntryPoint(entryPointStr);
 
-    int numLines = VRO_ARRAY_LENGTH(codeLines_j);
-    std::vector<std::string> code;
-    for (int i = 0; i < numLines; i++) {
-        VRO_STRING line_j = VRO_STRING_ARRAY_GET(codeLines_j, i);
-        code.push_back(VRO_STRING_STL(line_j));
+    // Split shader code into lines
+    std::vector<std::string> lines;
+    std::stringstream ss(shaderCodeStr);
+    std::string line;
+    while (std::getline(ss, line)) {
+        lines.push_back(line);
     }
 
-    auto modifier = std::make_shared<VROShaderModifier>(entryPoint, code);
-    modifier->setName(entryPointStr + "_modifier");
+    // Add shader modifiers synchronously during material creation to avoid race conditions.
+    // Temporarily disable thread restrictions like the immutable constructor does.
+    std::shared_ptr<VROMaterial> material = VRO_REF_GET(VROMaterial, material_j);
+    if (material) {
+        material->setThreadRestrictionEnabled(false);
+        auto modifier = std::make_shared<VROShaderModifier>(entryPoint, lines);
+        material->addShaderModifier(modifier);
+        material->setThreadRestrictionEnabled(true);
+    } else {
+        pwarn("Material_JNI: Material reference is null!");
+    }
+}
+
+VRO_METHOD(void, nativeAddShaderModifierWithVaryings)(VRO_ARGS
+                                                       VRO_REF(VROMaterial) material_j,
+                                                       VRO_STRING entryPoint_j,
+                                                       VRO_STRING shaderCode_j,
+                                                       VRO_STRING_ARRAY varyings_j,
+                                                       VRO_BOOL requiresSceneDepth_j,
+                                                       VRO_BOOL requiresCameraTexture_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string entryPointStr = VRO_STRING_STL(entryPoint_j);
+    std::string shaderCodeStr = VRO_STRING_STL(shaderCode_j);
+
+    VROShaderEntryPoint entryPoint = parseShaderEntryPoint(entryPointStr);
+
+    // Split shader code into lines
+    std::vector<std::string> lines;
+    std::stringstream ss(shaderCodeStr);
+    std::string line;
+    while (std::getline(ss, line)) {
+        lines.push_back(line);
+    }
+
+    // Parse varyings array
+    std::vector<std::string> varyings;
+    if (varyings_j) {
+        int numVaryings = VRO_ARRAY_LENGTH(varyings_j);
+        for (int i = 0; i < numVaryings; i++) {
+            VRO_STRING v_j = VRO_STRING_ARRAY_GET(varyings_j, i);
+            varyings.push_back(VRO_STRING_STL(v_j));
+        }
+    }
+
+    std::shared_ptr<VROMaterial> material = VRO_REF_GET(VROMaterial, material_j);
+    if (material) {
+        material->setThreadRestrictionEnabled(false);
+        auto modifier = std::make_shared<VROShaderModifier>(entryPoint, lines);
+        if (!varyings.empty()) {
+            modifier->setVaryings(varyings);
+        }
+        modifier->setRequiresSceneDepth(requiresSceneDepth_j);
+        modifier->setRequiresCameraTexture(requiresCameraTexture_j);
+        material->addShaderModifier(modifier);
+        material->setThreadRestrictionEnabled(true);
+    } else {
+        pwarn("Material_JNI: Material reference is null (nativeAddShaderModifierWithVaryings)!");
+    }
+}
+
+VRO_METHOD(void, nativeSetShaderUniformFloat)(VRO_ARGS
+                                              VRO_REF(VROMaterial) material_j,
+                                              VRO_STRING uniformName_j,
+                                              VRO_FLOAT value) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string uniformName = VRO_STRING_STL(uniformName_j);
 
     std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
-    VROPlatformDispatchAsyncRenderer([material_w, modifier] {
+    VROPlatformDispatchAsyncRenderer([material_w, uniformName, value] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (material) {
+            material->setShaderUniform(uniformName, value);
+        }
+    });
+}
+
+VRO_METHOD(void, nativeSetShaderUniformVec3)(VRO_ARGS
+                                             VRO_REF(VROMaterial) material_j,
+                                             VRO_STRING uniformName_j,
+                                             VRO_FLOAT x, VRO_FLOAT y, VRO_FLOAT z) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string uniformName = VRO_STRING_STL(uniformName_j);
+    VROVector3f value(x, y, z);
+
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, uniformName, value] {
         std::shared_ptr<VROMaterial> material = material_w.lock();
         if (!material) {
             return;
         }
-        material->addShaderModifier(modifier);
+        material->setShaderUniform(uniformName, value);
     });
+}
+
+VRO_METHOD(void, nativeSetShaderUniformVec4)(VRO_ARGS
+                                             VRO_REF(VROMaterial) material_j,
+                                             VRO_STRING uniformName_j,
+                                             VRO_FLOAT x, VRO_FLOAT y, VRO_FLOAT z, VRO_FLOAT w) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string uniformName = VRO_STRING_STL(uniformName_j);
+    VROVector4f value(x, y, z, w);
+
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, uniformName, value] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (!material) {
+            return;
+        }
+        material->setShaderUniform(uniformName, value);
+    });
+}
+
+VRO_METHOD(void, nativeSetShaderUniformMat4)(VRO_ARGS
+                                             VRO_REF(VROMaterial) material_j,
+                                             VRO_STRING uniformName_j,
+                                             VRO_FLOAT_ARRAY matrix_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string uniformName = VRO_STRING_STL(uniformName_j);
+
+    // Get the matrix elements from the Java array (should be 16 elements)
+    int length = VRO_ARRAY_LENGTH(matrix_j);
+    if (length != 16) {
+        pwarn("Matrix array must have 16 elements for mat4, got %d", length);
+        return;
+    }
+
+    VRO_FLOAT *elements = VRO_FLOAT_ARRAY_GET_ELEMENTS(matrix_j);
+    VROMatrix4f value(elements);
+    VRO_FLOAT_ARRAY_RELEASE_ELEMENTS(matrix_j, elements);
+
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, uniformName, value] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (!material) {
+            return;
+        }
+        material->setShaderUniform(uniformName, value);
+    });
+}
+
+VRO_METHOD(void, nativeSetShaderUniformTexture)(VRO_ARGS
+                                               VRO_REF(VROMaterial) material_j,
+                                               VRO_STRING uniformName_j,
+                                               VRO_REF(VROTexture) texture_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::string uniformName = VRO_STRING_STL(uniformName_j);
+
+    std::shared_ptr<VROTexture> texture;
+    if (texture_j) {
+        texture = VRO_REF_GET(VROTexture, texture_j);
+    }
+
+    std::weak_ptr<VROMaterial> material_w = VRO_REF_GET(VROMaterial, material_j);
+    VROPlatformDispatchAsyncRenderer([material_w, uniformName, texture] {
+        std::shared_ptr<VROMaterial> material = material_w.lock();
+        if (!material) {
+            return;
+        }
+        material->setShaderUniform(uniformName, texture);
+    });
+}
+
+VRO_METHOD(void, nativeCopyShaderUniforms)(VRO_ARGS
+                                           VRO_REF(VROMaterial) dest_j,
+                                           VRO_REF(VROMaterial) source_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::shared_ptr<VROMaterial> source = VRO_REF_GET(VROMaterial, source_j);
+    std::weak_ptr<VROMaterial> dest_w = VRO_REF_GET(VROMaterial, dest_j);
+
+    if (!source) {
+        return;
+    }
+
+    // Capture uniform values by value (copy them now on this thread)
+    // This avoids race conditions when the render thread processes them
+    auto floatUniforms = source->getShaderUniformFloats();
+    auto vec3Uniforms = source->getShaderUniformVec3s();
+    auto vec4Uniforms = source->getShaderUniformVec4s();
+    auto mat4Uniforms = source->getShaderUniformMat4s();
+    auto textureUniforms = source->getShaderUniformTextures();
+
+    // Dispatch to render thread with captured values
+    VROPlatformDispatchAsyncRenderer([dest_w, floatUniforms, vec3Uniforms, vec4Uniforms, mat4Uniforms, textureUniforms] {
+        std::shared_ptr<VROMaterial> dest = dest_w.lock();
+        if (!dest) {
+            return;
+        }
+
+        // Copy float uniforms
+        for (const auto &uniform : floatUniforms) {
+            dest->setShaderUniform(uniform.first, uniform.second);
+        }
+
+        // Copy vec3 uniforms
+        for (const auto &uniform : vec3Uniforms) {
+            dest->setShaderUniform(uniform.first, uniform.second);
+        }
+
+        // Copy vec4 uniforms
+        for (const auto &uniform : vec4Uniforms) {
+            dest->setShaderUniform(uniform.first, uniform.second);
+        }
+
+        // Copy mat4 uniforms
+        for (const auto &uniform : mat4Uniforms) {
+            dest->setShaderUniform(uniform.first, uniform.second);
+        }
+
+        // Copy texture uniforms
+        for (const auto &uniform : textureUniforms) {
+            dest->setShaderUniform(uniform.first, uniform.second);
+        }
+    });
+}
+
+VRO_METHOD(void, nativeCopyShaderModifiers)(VRO_ARGS
+                                            VRO_REF(VROMaterial) dest_j,
+                                            VRO_REF(VROMaterial) source_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::shared_ptr<VROMaterial> source = VRO_REF_GET(VROMaterial, source_j);
+    std::shared_ptr<VROMaterial> dest = VRO_REF_GET(VROMaterial, dest_j);
+
+    if (!source || !dest) {
+        return;
+    }
+
+    // Copy shader modifiers synchronously (during material setup)
+    // Disable thread restrictions temporarily
+    dest->setThreadRestrictionEnabled(false);
+
+    // Copy all shader modifiers from source to destination
+    for (const auto &modifier : source->getShaderModifiers()) {
+        dest->addShaderModifier(modifier);
+    }
+
+    // Copy all uniforms as well
+    for (const auto &uniform : source->getShaderUniformFloats()) {
+        dest->setShaderUniform(uniform.first, uniform.second);
+    }
+    for (const auto &uniform : source->getShaderUniformVec3s()) {
+        dest->setShaderUniform(uniform.first, uniform.second);
+    }
+    for (const auto &uniform : source->getShaderUniformVec4s()) {
+        dest->setShaderUniform(uniform.first, uniform.second);
+    }
+    for (const auto &uniform : source->getShaderUniformMat4s()) {
+        dest->setShaderUniform(uniform.first, uniform.second);
+    }
+    for (const auto &uniform : source->getShaderUniformTextures()) {
+        dest->setShaderUniform(uniform.first, uniform.second);
+    }
+
+    dest->setThreadRestrictionEnabled(true);
+}
+
+VRO_METHOD(void, nativeRemoveAllShaderModifiers)(VRO_ARGS
+                                                  VRO_REF(VROMaterial) material_j) {
+    VRO_METHOD_PREAMBLE;
+
+    std::shared_ptr<VROMaterial> material = VRO_REF_GET(VROMaterial, material_j);
+    if (!material) {
+        return;
+    }
+
+    // Remove shader modifiers synchronously (during material setup)
+    // This matches the synchronous behavior of copyShaderModifiers
+    // Disable thread restrictions temporarily
+    material->setThreadRestrictionEnabled(false);
+    material->removeAllShaderModifiers();
+    material->setThreadRestrictionEnabled(true);
 }
 
 }  // extern "C"

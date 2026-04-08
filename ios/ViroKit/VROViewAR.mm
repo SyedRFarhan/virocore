@@ -106,6 +106,27 @@ struct VROScanWaveConfig {
     float accentIntensity = 0.0f;    // off by default
 };
 
+// ARKit's displayTransformForOrientation uses UIKit/Metal convention (y=0 at top of screen).
+// Custom camera-texture shader modifiers compute screenUV from clip-space NDC (y=0 at bottom,
+// OpenGL convention) and pass it directly to camera_image_transform without any Y-flip.
+// Pre-compose a Y-flip so the transform accepts OpenGL UVs:
+//   T'(x, y) = T(x, 1-y)  where T is the original UIKit-convention transform
+//   a'=a  b'=b  c'=-c  d'=-d  tx'=c+tx  ty'=d+ty   (VROMatrix4f is column-major)
+//
+// NOTE: This must NOT be applied to the depth texture transform. The built-in depth
+// shader modifiers (occlusion, debug) compute screenUV from gl_FragCoord and explicitly
+// flip Y themselves, so they already provide UIKit-convention UVs to ar_depth_texture_transform.
+static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
+    VROMatrix4f m;               // default-constructed to identity
+    m[0]  =  t[0];               // a
+    m[1]  =  t[1];               // b
+    m[4]  = -t[4];               // -c
+    m[5]  = -t[5];               // -d
+    m[12] =  t[4] + t[12];       // c + tx
+    m[13] =  t[5] + t[13];       // d + ty
+    return m;
+}
+
 @interface VROViewAR () {
     std::shared_ptr<VRORenderer> _renderer;
     std::shared_ptr<VROARSceneController> _sceneController;
@@ -144,6 +165,12 @@ struct VROScanWaveConfig {
     float _scanWaveTotalDuration;
     int _scanWaveCurrentLoop;
     double _scanWaveLoopStartTime;
+
+    // Semantic debug overlay modifier and its state
+    std::shared_ptr<VROShaderModifier> _semanticDebugModifier;
+    bool _semanticDebugModifierAdded;
+    bool _semanticDebugEnabled;
+    VROMatrix4f _semanticTextureTransform; // getViewportToCameraImageTransform() — GL-convention (y=0 bottom)
 }
 
 @property (readwrite, nonatomic) VROTrackingType trackingType;
@@ -299,6 +326,8 @@ struct VROScanWaveConfig {
     _scanWaveEnabled = false;
     _scanWaveCompleted = false;
     _scanWaveStartTime = 0;
+    _semanticDebugModifierAdded = false;
+    _semanticDebugEnabled = false;
 
     _inputController = std::make_shared<VROInputControllerAR>(self.frame.size.width * self.contentScaleFactor,
                                                               self.frame.size.height * self.contentScaleFactor,
@@ -314,8 +343,10 @@ struct VROScanWaveConfig {
 #if !VRO_POSEMOJI
     AVAudioSession *session = [AVAudioSession sharedInstance];
     [session setCategory:AVAudioSessionCategoryPlayAndRecord
-             withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker
+                    mode:AVAudioSessionModeVideoRecording
+                 options:AVAudioSessionCategoryOptionDefaultToSpeaker
                    error:nil];
+    [session setActive:YES error:nil];
 #endif
     /*
      Create AR session checking if an ARKit class and one of our classes have been defined. If not, then load VROARSessionInertial,
@@ -467,6 +498,11 @@ struct VROScanWaveConfig {
     // Clean up scene controller and its node tree
     if (_sceneController) {
         if (_sceneController->getScene()) {
+            // CRITICAL: Remove all children FIRST to release their shared_ptrs
+            // This must happen BEFORE deleteGL to actually destroy the objects
+            _sceneController->getScene()->getRootNode()->removeAllChildren();
+
+            // Now call deleteGL to release GPU resources
             _sceneController->getScene()->getRootNode()->deleteGL();
         }
         _sceneController.reset();
@@ -1058,11 +1094,20 @@ struct VROScanWaveConfig {
     }
 
     _cameraBackground->setTexcoordTransform(backgroundTransform);
+    // Convert to GL convention (y=0 bottom) so the masking shader can use gl_FragCoord directly
+    // without a Y-flip. viroGLConvTransform bakes in the flip, same pattern as setCameraImageTransform.
+    _semanticTextureTransform = viroGLConvTransform(backgroundTransform);
+    _renderer->setSemanticTextureTransform(_semanticTextureTransform);
 
     /*
      Update occlusion settings on the camera background.
      */
     [self updateBackgroundOcclusionWithFrame:frame];
+
+    /*
+     Update semantic debug overlay on the camera background.
+     */
+    [self updateBackgroundSemanticsDebug];
 
     /*
      Notify the current ARScene with the ARCamera's tracking state.
@@ -1119,6 +1164,14 @@ struct VROScanWaveConfig {
     if (occlusionMode != VROOcclusionMode::Disabled) {
         depthTexture = frame->getDepthTexture();
         if (depthTexture) {
+            // Do NOT apply viroGLConvTransform here. The depth shader modifiers
+            // (createOcclusionMaskModifier / createDepthDebugModifier) compute screenUV
+            // as gl_FragCoord / viewport and then explicitly flip Y:
+            //   screenUV.y = 1.0 - screenUV.y
+            // That puts screenUV in UIKit convention (y=0 at top), which is exactly
+            // what getDepthTextureTransform() expects. Wrapping with viroGLConvTransform
+            // would apply a second Y-flip, shifting the depth sample to the wrong
+            // vertical position (the mispositioning bug introduced by commit 7115d7fb).
             depthTextureTransform = frame->getDepthTextureTransform();
 
             // Ensure the depth texture is uploaded to GPU before rendering
@@ -1138,30 +1191,44 @@ struct VROScanWaveConfig {
     _renderer->setDepthTexture(depthTexture);
     _renderer->setDepthTextureTransform(depthTextureTransform);
 
+    // Expose live camera feed to shader modifiers via 'camera_texture' sampler
+    _renderer->setCameraBackgroundTexture(_arSession->getCameraBackgroundTexture());
+    _renderer->setCameraImageTransform(viroGLConvTransform(frame->getViewportToCameraImageTransform()));
+
+    // Semantic texture: provided by ARCore SDK on iOS (ARCore/Semantics pod required).
+    // Returns nullptr if semantic mode is not enabled or device/pod is unavailable.
+    _renderer->setSemanticTexture(_arSession->getSemanticTexture());
+    // Confidence texture: iOS returns a 1×1 white fallback (hard edges); Android provides
+    // real per-pixel confidence for smooth alpha blend at segmentation boundaries.
+    _renderer->setSemanticConfidenceTexture(_arSession->getSemanticConfidenceTexture());
+
     _pointOfView->getCamera()->setPosition(position);
     _renderer->prepareFrame(_frame, viewport, fov, rotation, projection, _driver);
 
+    // DEBUG: Occlusion debug logging (every 60 frames)
+    // Uncomment for debugging: occlusionMode, depthTexture, transform, viewport, camera image dimensions
+    /*
     static int occDebugCounter = 0;
     if (occDebugCounter++ % 60 == 0) {
-        NSLog(@"[VIRO_OCC_DEBUG] occlusionMode=%d, depthTexture=%p, hydrated=%d",
+        NSLog(@"DEBUG occlusionMode=%d, depthTexture=%p, hydrated=%d",
               (int)occlusionMode, depthTexture.get(),
               depthTexture ? depthTexture->isHydrated() : -1);
         if (depthTexture) {
-            NSLog(@"[VIRO_OCC_DEBUG] depthTexture size=%dx%d", depthTexture->getWidth(), depthTexture->getHeight());
-            NSLog(@"[VIRO_OCC_DEBUG] transform: [%.3f, %.3f, 0, 0]", depthTextureTransform[0], depthTextureTransform[1]);
-            NSLog(@"[VIRO_OCC_DEBUG]           [%.3f, %.3f, 0, 0]", depthTextureTransform[4], depthTextureTransform[5]);
-            NSLog(@"[VIRO_OCC_DEBUG]           tx=%.3f, ty=%.3f", depthTextureTransform[12], depthTextureTransform[13]);
-            NSLog(@"[VIRO_OCC_DEBUG] viewport=%dx%d", viewport.getWidth(), viewport.getHeight());
-            // Log camera image dimensions to verify crop calculation
+            NSLog(@"DEBUG depthTexture size=%dx%d", depthTexture->getWidth(), depthTexture->getHeight());
+            NSLog(@"DEBUG transform: [%.3f, %.3f, 0, 0]", depthTextureTransform[0], depthTextureTransform[1]);
+            NSLog(@"DEBUG           [%.3f, %.3f, 0, 0]", depthTextureTransform[4], depthTextureTransform[5]);
+            NSLog(@"DEBUG           tx=%.3f, ty=%.3f", depthTextureTransform[12], depthTextureTransform[13]);
+            NSLog(@"DEBUG viewport=%dx%d", viewport.getWidth(), viewport.getHeight());
             const VROARFrameiOS *frameiOS = dynamic_cast<const VROARFrameiOS *>(frame.get());
             if (frameiOS) {
                 CVPixelBufferRef camImg = frameiOS->getImage();
                 if (camImg) {
-                    NSLog(@"[VIRO_OCC_DEBUG] camImage=%zux%zu", CVPixelBufferGetWidth(camImg), CVPixelBufferGetHeight(camImg));
+                    NSLog(@"DEBUG camImage=%zux%zu", CVPixelBufferGetWidth(camImg), CVPixelBufferGetHeight(camImg));
                 }
             }
         }
     }
+    */
 
     _renderer->renderEye(VROEyeType::Monocular, _renderer->getLookAtMatrix(), projection, viewport, _driver);
     _renderer->renderHUD(VROEyeType::Monocular, VROMatrix4f::identity(), projection, _driver);
@@ -1507,6 +1574,49 @@ struct VROScanWaveConfig {
     // Occlusion is handled per-3D-object in the fragment shader via the occlusion mask modifier
     // which is automatically added by VROShaderFactory when arOcclusion capability is enabled.
     material->setWritesToDepthBuffer(false);
+}
+
+- (void)updateBackgroundSemanticsDebug {
+    std::shared_ptr<VROMaterial> material = _cameraBackground->getMaterials()[0];
+
+    if (_semanticDebugEnabled) {
+        if (!_semanticDebugModifierAdded) {
+            _semanticDebugModifier = VROShaderFactory::createSemanticDebugModifier();
+
+            __weak VROViewAR *weakSelf = self;
+            _semanticDebugModifier->setUniformBinder("ar_viewport_size", VROShaderProperty::Vec3,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *strongSelf = weakSelf;
+                    if (strongSelf) {
+                        VROVector3f size((float)strongSelf->_currentViewport.getWidth(),
+                                        (float)strongSelf->_currentViewport.getHeight(), 0.0f);
+                        uniform->setVec3(size);
+                    }
+                });
+
+            _semanticDebugModifier->setUniformBinder("ar_semantic_texture_transform", VROShaderProperty::Mat4,
+                [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
+                    VROViewAR *strongSelf = weakSelf;
+                    if (strongSelf) {
+                        uniform->setMat4(strongSelf->_semanticTextureTransform);
+                    }
+                });
+
+            material->addShaderModifier(_semanticDebugModifier);
+            _semanticDebugModifierAdded = true;
+        }
+    } else {
+        if (_semanticDebugModifierAdded && _semanticDebugModifier) {
+            material->removeShaderModifier(_semanticDebugModifier);
+            _semanticDebugModifier.reset();
+            _semanticDebugModifierAdded = false;
+        }
+    }
+}
+
+- (void)setSemanticDebugEnabled:(BOOL)enabled {
+    _semanticDebugEnabled = enabled;
+    // The modifier is added/removed in updateBackgroundSemanticsDebug on the next frame.
 }
 
 - (void)initARSessionWithViewport:(VROViewport)viewport scene:(std::shared_ptr<VROScene>)scene {

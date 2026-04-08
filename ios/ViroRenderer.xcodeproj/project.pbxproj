@@ -916,10 +916,17 @@
 		E113082D2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.h in Headers */ = {isa = PBXBuildFile; fileRef = E113082B2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E113082E2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.mm in Sources */ = {isa = PBXBuildFile; fileRef = E113082C2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.mm */; };
 		E12582562EC58CC0000722C2 /* VROVector2f.h in Headers */ = {isa = PBXBuildFile; fileRef = E12582552EC58CC0000722C2 /* VROVector2f.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E15075852F185C5700653622 /* VROARHitTestResultiOS.mm in Sources */ = {isa = PBXBuildFile; fileRef = E15075842F185C5700653622 /* VROARHitTestResultiOS.mm */; };
+		E15075862F185C5700653622 /* VROARHitTestResultiOS.h in Headers */ = {isa = PBXBuildFile; fileRef = E15075832F185C5700653622 /* VROARHitTestResultiOS.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E1626A182F46B830005AA731 /* VROCloudAnchorProviderReactVision.h in Headers */ = {isa = PBXBuildFile; fileRef = E1626A162F46B830005AA731 /* VROCloudAnchorProviderReactVision.h */; };
+		E1626A192F46B830005AA731 /* VROCloudAnchorProviderReactVision.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1626A172F46B830005AA731 /* VROCloudAnchorProviderReactVision.mm */; };
+		E1626A1A2F46B83E005AA731 /* VROCloudAnchorProviderReactVision.h in Sources */ = {isa = PBXBuildFile; fileRef = E1626A162F46B830005AA731 /* VROCloudAnchorProviderReactVision.h */; };
 		E188BC752EE37644000A427E /* VROCloudAnchorProviderARCore.mm in Sources */ = {isa = PBXBuildFile; fileRef = E188BC742EE37644000A427E /* VROCloudAnchorProviderARCore.mm */; };
 		E188BC772EE37652000A427E /* VROCloudAnchorProviderARCore.h in Headers */ = {isa = PBXBuildFile; fileRef = E188BC762EE37652000A427E /* VROCloudAnchorProviderARCore.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E19926002EE3B7E900328B9D /* VROGeospatial.h in Headers */ = {isa = PBXBuildFile; fileRef = E19925FF2EE3B7E900328B9D /* VROGeospatial.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E19926022EE3B7F700328B9D /* VROGeospatialAnchor.h in Headers */ = {isa = PBXBuildFile; fileRef = E19926012EE3B7F700328B9D /* VROGeospatialAnchor.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E19DDA302F31A0D50097814B /* Shaders.metal in Resources */ = {isa = PBXBuildFile; fileRef = 8F517BC21BCDA2BD0017C70B /* Shaders.metal */; };
+		E1AAAA0000000002BBBBBBBB /* libreactvisioncca.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1AAAA0000000001BBBBBBBB /* libreactvisioncca.a */; };
 		E1B267D52EE5228E00F0718C /* VROARWorldMesh.h in Headers */ = {isa = PBXBuildFile; fileRef = E1B267D12EE5228E00F0718C /* VROARWorldMesh.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E1B267D62EE5228E00F0718C /* VROARDepthMesh.h in Headers */ = {isa = PBXBuildFile; fileRef = E1B267CF2EE5228E00F0718C /* VROARDepthMesh.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E1B267D92EE5263A00F0718C /* VROARWorldMesh.mm in Sources */ = {isa = PBXBuildFile; fileRef = E1B267D82EE5263A00F0718C /* VROARWorldMesh.mm */; };
@@ -1915,10 +1922,15 @@
 		E113082B2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROMonocularDepthEstimator.h; sourceTree = "<group>"; };
 		E113082C2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = VROMonocularDepthEstimator.mm; sourceTree = "<group>"; };
 		E12582552EC58CC0000722C2 /* VROVector2f.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROVector2f.h; sourceTree = "<group>"; };
+		E15075832F185C5700653622 /* VROARHitTestResultiOS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROARHitTestResultiOS.h; sourceTree = "<group>"; };
+		E15075842F185C5700653622 /* VROARHitTestResultiOS.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = VROARHitTestResultiOS.mm; sourceTree = "<group>"; };
+		E1626A162F46B830005AA731 /* VROCloudAnchorProviderReactVision.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROCloudAnchorProviderReactVision.h; sourceTree = "<group>"; };
+		E1626A172F46B830005AA731 /* VROCloudAnchorProviderReactVision.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = VROCloudAnchorProviderReactVision.mm; sourceTree = "<group>"; };
 		E188BC742EE37644000A427E /* VROCloudAnchorProviderARCore.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = VROCloudAnchorProviderARCore.mm; sourceTree = "<group>"; };
 		E188BC762EE37652000A427E /* VROCloudAnchorProviderARCore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROCloudAnchorProviderARCore.h; sourceTree = "<group>"; };
 		E19925FF2EE3B7E900328B9D /* VROGeospatial.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROGeospatial.h; sourceTree = "<group>"; };
 		E19926012EE3B7F700328B9D /* VROGeospatialAnchor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROGeospatialAnchor.h; sourceTree = "<group>"; };
+		E1AAAA0000000001BBBBBBBB /* libreactvisioncca.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libreactvisioncca.a; path = Libraries/reactvisioncca/libreactvisioncca.a; sourceTree = "<group>"; };
 		E1B267CF2EE5228E00F0718C /* VROARDepthMesh.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROARDepthMesh.h; sourceTree = "<group>"; };
 		E1B267D12EE5228E00F0718C /* VROARWorldMesh.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VROARWorldMesh.h; sourceTree = "<group>"; };
 		E1B267D72EE5263A00F0718C /* VROARDepthMesh.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = VROARDepthMesh.mm; sourceTree = "<group>"; };
@@ -1958,6 +1970,7 @@
 				A5EC65871EB3ECE200FE220E /* libBulletDynamics.a in Frameworks */,
 				A5EC65881EB3ECE200FE220E /* libBulletSoftBody.a in Frameworks */,
 				A5EC65891EB3ECE200FE220E /* libLinearMath.a in Frameworks */,
+				E1AAAA0000000002BBBBBBBB /* libreactvisioncca.a in Frameworks */,
 				8F1664A61E5E43260062EBCE /* Accelerate.framework in Frameworks */,
 				8FDDE2121CD00F2600674DE2 /* CoreText.framework in Frameworks */,
 				EAD7E32D2DFA518AEAAB48C2 /* (null) in Frameworks */,
@@ -2430,6 +2443,8 @@
 		8F53D3A61DCBA041001C91A8 /* iOS Impl */ = {
 			isa = PBXGroup;
 			children = (
+				E15075832F185C5700653622 /* VROARHitTestResultiOS.h */,
+				E15075842F185C5700653622 /* VROARHitTestResultiOS.mm */,
 				E11308272EF0F574008AB6A1 /* VROModelDownloader.h */,
 				E11308282EF0F574008AB6A1 /* VROModelDownloader.mm */,
 				E113082B2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.h */,
@@ -2973,6 +2988,8 @@
 				8F11B7C41C20B2A20026D150 /* VRORenderDelegate.h */,
 				8FAE504A222C3CD40043220B /* VRODeviceUtil.h */,
 				8FAE504B222C3CD40043220B /* VRODeviceUtil.m */,
+				E1626A162F46B830005AA731 /* VROCloudAnchorProviderReactVision.h */,
+				E1626A172F46B830005AA731 /* VROCloudAnchorProviderReactVision.mm */,
 				8FAE5049222C3CD40043220B /* DeviceList.plist */,
 				8FD4DED11C18ECD4003DC425 /* Info.plist */,
 			);
@@ -3298,6 +3315,7 @@
 				A5EC65831EB3ECE200FE220E /* libBulletDynamics.a */,
 				A5EC65841EB3ECE200FE220E /* libBulletSoftBody.a */,
 				A5EC65851EB3ECE200FE220E /* libLinearMath.a */,
+				E1AAAA0000000001BBBBBBBB /* libreactvisioncca.a */,
 				2D0B4C6A395983278D4D0E37 /* Pods_ViroKit.framework */,
 				71CFD9348F08872142AFB019 /* Pods_ViroSample.framework */,
 			);
@@ -3343,6 +3361,7 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E15075862F185C5700653622 /* VROARHitTestResultiOS.h in Headers */,
 				E11308292EF0F574008AB6A1 /* VROModelDownloader.h in Headers */,
 				E113082D2EF0F57D008AB6A1 /* VROMonocularDepthEstimator.h in Headers */,
 				F1A3B5CA2F01D8B000AB12CD /* VROARHitTestResultiOS.h in Headers */,
@@ -3660,6 +3679,7 @@
 				8FD2A50E1F81283800E831A6 /* VRORendererTestHarness.h in Headers */,
 				8AB5B73B211B72120030906A /* VROARObjectAnchor.h in Headers */,
 				8FAE18CC1EE79D880021C7BB /* VROARCameraiOS.h in Headers */,
+				E1626A182F46B830005AA731 /* VROCloudAnchorProviderReactVision.h in Headers */,
 				8FB30CA622416AA3000C7D68 /* VROSkeletonRenderer.h in Headers */,
 				A5DD985D21C4E5D400395CA0 /* VROBodyTrackerController.h in Headers */,
 				13BC8FA921507E4600479BE0 /* VROQuaternion.h in Headers */,
@@ -3723,6 +3743,7 @@
 			buildConfigurationList = 8FD4DEE41C18ECD4003DC425 /* Build configuration list for PBXNativeTarget "ViroKit" */;
 			buildPhases = (
 				B31028429A1A7BF8A56724FA /* [CP] Check Pods Manifest.lock */,
+				E1AAAA0000000003BBBBBBBB /* Ensure ReactVisionCCA placeholders exist */,
 				8FD4DEC81C18ECD4003DC425 /* Sources */,
 				8FD4DEC91C18ECD4003DC425 /* Frameworks */,
 				8FD4DECA1C18ECD4003DC425 /* Headers */,
@@ -4035,6 +4056,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E19DDA302F31A0D50097814B /* Shaders.metal in Resources */,
 				A547DB6C2022ED0700C8FE67 /* brdf_fsh.glsl in Resources */,
 				A547DB6D2022ED0700C8FE67 /* brdf_vsh.glsl in Resources */,
 				A597F8E8201AB9EE007EE387 /* prefilter_convolution_fsh.glsl in Resources */,
@@ -4110,7 +4132,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "VIRO_FRAMEWORK_PATH=$PROJECT_DIR/../../viro/ios/dist/ViroRenderer\nVIRO_DEVICE_FRAMEWORK=$VIRO_FRAMEWORK_PATH/armv7_arm64\nVIRO_SIMULATOR_FRAMEWORK=$VIRO_FRAMEWORK_PATH/x86_64\n\n# Copy the framework (device or simulator) to react-viro\nif [ ${PLATFORM_NAME} = \"iphonesimulator\" ]; then\nmkdir -p $VIRO_SIMULATOR_FRAMEWORK\ncp -r $TARGET_BUILD_DIR/ViroKit.framework $VIRO_SIMULATOR_FRAMEWORK\nelse\nmkdir -p $VIRO_DEVICE_FRAMEWORK\ncp -r $TARGET_BUILD_DIR/ViroKit.framework $VIRO_DEVICE_FRAMEWORK\nfi\n\n# If both the device and simulator frameworks now exist, create the Universal framework\nif [ -f $VIRO_DEVICE_FRAMEWORK/ViroKit.framework/ViroKit ] && [ -f $VIRO_SIMULATOR_FRAMEWORK/ViroKit.framework/ViroKit ]; then\ncp -r $TARGET_BUILD_DIR/ViroKit.framework $VIRO_FRAMEWORK_PATH\nlipo $VIRO_SIMULATOR_FRAMEWORK/ViroKit.framework/ViroKit $VIRO_DEVICE_FRAMEWORK/ViroKit.framework/ViroKit -create -output $VIRO_FRAMEWORK_PATH/ViroKit.framework/ViroKit\nfi\n\n# Copy over the podspec\ncp -r $PROJECT_DIR/ViroKit.podspec $PROJECT_DIR/../../viro/ios/dist/ViroRenderer\n";
+			shellScript = "VIRO_FRAMEWORK_PATH=$PROJECT_DIR/../../viro/ios/dist/ViroRenderer                          \n                                                                                    \nmkdir -p $VIRO_FRAMEWORK_PATH                                                              \ncp -r $TARGET_BUILD_DIR/ViroKit.framework $VIRO_FRAMEWORK_PATH                             \n                                                                                         \n# Copy over the podspec                                                                    \ncp -r $PROJECT_DIR/ViroKit.podspec $PROJECT_DIR/../../viro/ios/dist/ViroRenderer  \n";
 			showEnvVarsInLog = 0;
 		};
 		B31028429A1A7BF8A56724FA /* [CP] Check Pods Manifest.lock */ = {
@@ -4195,6 +4217,23 @@
 			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-ViroSample/Pods-ViroSample-resources.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
+		E1AAAA0000000003BBBBBBBB /* Ensure ReactVisionCCA placeholders exist */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Ensure ReactVisionCCA placeholders exist";
+			outputPaths = (
+				"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64/libreactvisioncca.a",
+				"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64_simulator/libreactvisioncca.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# ReactVisionCCA is an optional proprietary library.\n# If the real .a files have not been deployed by scripts/build_ios.sh,\n# create empty placeholder archives so the link step succeeds.\n# Source code detects availability via __has_include at compile time.\n\nRVCCA_DIR=\"$PROJECT_DIR/Libraries/reactvisioncca\"\nmkdir -p \"$RVCCA_DIR/arm64\" \"$RVCCA_DIR/arm64_simulator\"\n\nfor ARCH_DIR in arm64 arm64_simulator; do\n    LIB=\"$RVCCA_DIR/$ARCH_DIR/libreactvisioncca.a\"\n    if [ ! -f \"$LIB\" ]; then\n        echo \"note: ReactVisionCCA ($ARCH_DIR): not found \\u2014 creating empty placeholder (ReactVision Cloud Anchors disabled)\"\n        ar rc \"$LIB\"\n        ranlib \"$LIB\"\n    fi\ndone\n";
+			showEnvVarsInLog = 0;
+		};
 		E82CFD5E20AECB790091154F /* Lipo Framework and Copy to Bridge (build intermediates for Jenkins) */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -4254,6 +4293,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E1626A1A2F46B83E005AA731 /* VROCloudAnchorProviderReactVision.h in Sources */,
 				8FE52F3721E82A8400BA63D4 /* VROObjectRecognitionTest.cpp in Sources */,
 				A57CA8DC20ADFDB700DE85A1 /* VROGLTFTest.cpp in Sources */,
 				A5B433EE204E65B600E9EE53 /* VROFixedParticleEmitter.cpp in Sources */,
@@ -4317,6 +4357,7 @@
 				8FE572F5246A15C200CD3ED5 /* VROGVRUtil.cpp in Sources */,
 				8FA2E1601C45DD270070DB26 /* VROReticle.cpp in Sources */,
 				8F0E5E981F3B52480007AD03 /* VRORenderTargetOpenGL.cpp in Sources */,
+				E1626A192F46B830005AA731 /* VROCloudAnchorProviderReactVision.mm in Sources */,
 				8FDDB4B01DB055A700DE0968 /* VROShaderModifier.cpp in Sources */,
 				8FB4AE1321A440C30026096E /* VRODriver.cpp in Sources */,
 				8FD06F211E832760003D3BC4 /* VROCameraTextureiOS.cpp in Sources */,
@@ -4386,6 +4427,7 @@
 				8FD2A54F1F813C4100E831A6 /* VROHDRTest.cpp in Sources */,
 				8FC542872296144F00D2AFBB /* VROVisionEngine.cpp in Sources */,
 				8FD4DF121C18ED44003DC425 /* Matrix3x3d.mm in Sources */,
+				E15075852F185C5700653622 /* VROARHitTestResultiOS.mm in Sources */,
 				8FD4DEFA1C18ED19003DC425 /* VROMatrix4f.cpp in Sources */,
 				8FA9D6D42226EED70003C9D2 /* VROPoseFilterBoneDistance.cpp in Sources */,
 				8FC5428B2297297300D2AFBB /* bodymesh.mlmodel in Sources */,
@@ -4599,6 +4641,7 @@
 					"$(SRCROOT)/Libraries/bullet/include",
 					"$(SRCROOT)/Libraries/harfbuzz/include",
 					"$(SRCROOT)/../ViroRenderer/",
+					"$(SRCROOT)/../../reactvisioncca/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MTL_ENABLE_DEBUG_INFO = YES;
@@ -4659,6 +4702,7 @@
 					"$(SRCROOT)/Libraries/bullet/include",
 					"$(SRCROOT)/Libraries/harfbuzz/include",
 					"$(SRCROOT)/../ViroRenderer/",
+					"$(SRCROOT)/../../reactvisioncca/include",
 				);
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
@@ -4827,13 +4871,17 @@
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
-				LIBRARY_SEARCH_PATHS = "$(inherited)";
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64",
+				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Libraries/freetype/armv7_arm64",
 					"$(PROJECT_DIR)/Libraries/protobuf/armv7_arm64",
 					"$(PROJECT_DIR)/Libraries/bullet/armv7_arm64",
 					"$(PROJECT_DIR)/Libraries/harfbuzz/armv7_arm64",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64",
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = (
 					"$(inherited)",
@@ -4841,6 +4889,7 @@
 					"$(PROJECT_DIR)/Libraries/protobuf/x86_64",
 					"$(PROJECT_DIR)/Libraries/bullet/x86_64",
 					"$(PROJECT_DIR)/Libraries/harfbuzz/x86_64",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64_simulator",
 				);
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_CFLAGS = (
@@ -4930,6 +4979,7 @@
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(PROJECT_DIR)/Libraries/harfbuzz/armv7_arm64",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64",
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = (
 					"$(inherited)",
@@ -4937,6 +4987,7 @@
 					"$(PROJECT_DIR)/Libraries/protobuf/armv7_arm64",
 					"$(PROJECT_DIR)/Libraries/bullet/armv7_arm64",
 					"$(PROJECT_DIR)/Libraries/harfbuzz/armv7_arm64",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64",
 				);
 				"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = (
 					"$(inherited)",
@@ -4944,6 +4995,7 @@
 					"$(PROJECT_DIR)/Libraries/protobuf/x86_64",
 					"$(PROJECT_DIR)/Libraries/bullet/x86_64",
 					"$(PROJECT_DIR)/Libraries/harfbuzz/x86_64",
+					"$(PROJECT_DIR)/Libraries/reactvisioncca/arm64_simulator",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",

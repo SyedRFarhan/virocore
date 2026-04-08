@@ -55,11 +55,19 @@ VROShaderModifier::VROShaderModifier(VROShaderEntryPoint entryPoint, std::vector
     _entryPoint(entryPoint) {
 
     for (std::string source : input) {
-        if (isVariableDeclaration(source)) {
-            _uniforms = _uniforms + source + "\n";
+        // Trim whitespace to handle template literal indentation
+        std::string trimmedSource = VROStringUtil::trim(source);
+
+        // Skip empty lines
+        if (trimmedSource.empty()) {
+            continue;
+        }
+
+        if (isVariableDeclaration(trimmedSource)) {
+            _uniforms = _uniforms + trimmedSource + "\n";
         }
         else {
-            _body = _body + source + "\n";
+            _body = _body + trimmedSource + "\n";
         }
     }
 
@@ -67,6 +75,36 @@ VROShaderModifier::VROShaderModifier(VROShaderEntryPoint entryPoint, std::vector
      At the end of each section add the corresponding directive.
      This way multiple shader modifiers can utilize the same entry point.
      */
+    _uniforms = _uniforms + getDirective(VROShaderSection::Uniforms) + "\n";
+    _body = _body + "\n" + getDirective(VROShaderSection::Body) + "\n";
+
+    ALLOCATION_TRACKER_ADD(ShaderModifiers, 1);
+}
+
+VROShaderModifier::VROShaderModifier(VROShaderEntryPoint entryPoint, std::string body) :
+    _shaderModifierId(++sShaderModifierId),
+    _attributes(0),
+    _entryPoint(entryPoint) {
+
+    std::stringstream ss(body);
+    std::string line;
+    while (std::getline(ss, line, '\n')) {
+        // Trim whitespace to handle template literal indentation
+        std::string trimmedLine = VROStringUtil::trim(line);
+
+        // Skip empty lines
+        if (trimmedLine.empty()) {
+            continue;
+        }
+
+        if (isVariableDeclaration(trimmedLine)) {
+            _uniforms = _uniforms + trimmedLine + "\n";
+        }
+        else {
+            _body = _body + trimmedLine + "\n";
+        }
+    }
+
     _uniforms = _uniforms + getDirective(VROShaderSection::Uniforms) + "\n";
     _body = _body + "\n" + getDirective(VROShaderSection::Body) + "\n";
 

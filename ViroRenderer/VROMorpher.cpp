@@ -539,6 +539,11 @@ void VROMorpher::setWeightForTarget(std::string key, float targetWeight, bool sh
         }
 
         if (_computeLocation == VROMorpher::ComputeLocation::GPU) {
+            // If the user has explicitly set a non-zero weight for this target,
+            // do not let the animation system override it.
+            if (_morphTargets[key]->userOverride) {
+                return;
+            }
             _morphTargets[key]->startWeight = targetWeight;
             return;
         }
@@ -563,6 +568,10 @@ void VROMorpher::setWeightForTarget(std::string key, float targetWeight, bool sh
     }
 
     if (_computeLocation == VROMorpher::ComputeLocation::GPU) {
+        // Track whether the user has a non-zero weight set, to prevent the
+        // animation system from overriding it each frame via the no-animate path.
+        target->userOverride = (targetWeight != 0.0f);
+
         // Switch the weights up, so that we always animate from the previous target weight.
         float currentWeight = target->startWeight;
         target->startWeight = targetWeight;

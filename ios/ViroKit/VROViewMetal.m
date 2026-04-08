@@ -3,7 +3,7 @@
 //  ViroRenderer
 //
 //  Created by Raj Advani on 4/22/16.
-//  Copyright © 2016 Viro Media. All rights reserved.
+//  Copyright Â© 2016 Viro Media. All rights reserved.
 //
 //  Permission is hereby granted, free of charge, to any person obtaining
 //  a copy of this software and associated documentation files (the
@@ -125,7 +125,31 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    
+
+    // Synchronize with render thread by waiting for all in-flight command buffers to complete
+    // This prevents textures and resources from being destroyed while GPU is still using them
+    for (int i = 0; i < 3; i++) {
+        dispatch_semaphore_wait(_inflight_semaphore, DISPATCH_TIME_FOREVER);
+    }
+    for (int i = 0; i < 3; i++) {
+        dispatch_semaphore_signal(_inflight_semaphore);
+    }
+
+    // Clear render delegate to prevent callbacks to deallocated objects
+    if (_renderer) {
+        _renderer->setDelegate(nullptr);
+    }
+    _renderDelegateWrapper = nullptr;
+
+    // Clear scene controller
+    _sceneController = nil;
+
+    // Release C++ shared_ptrs in correct order (renderer before driver)
+    _renderer = nullptr;
+    _driver = nullptr;
+    _vrDevice = nullptr;
+
+    // Delete C++ raw pointers
     delete (_distortionRenderer);
     delete (_headTracker);
     delete (_monocularEye);

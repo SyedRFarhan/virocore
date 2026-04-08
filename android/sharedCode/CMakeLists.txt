@@ -224,6 +224,8 @@ add_library( # Sets the name of the library.
              ${VIRO_ANDROID_SRC}/arcore/VROARHitTestResultARCore.cpp
              ${VIRO_ANDROID_SRC}/arcore/VROYuvImageConverter.cpp
              ${VIRO_ANDROID_SRC}/arcore/VROCloudAnchorProviderARCore.cpp
+             ${VIRO_ANDROID_SRC}/arcore/VROCloudAnchorProviderReactVision.cpp
+             ${VIRO_ANDROID_SRC}/arcore/VROARFrameSnapshot.cpp
              ${VIRO_ANDROID_SRC}/arcore/ARUtils_JNI.cpp
              ${VIRO_ANDROID_SRC}/arcore/ARNode_JNI.cpp
              ${VIRO_ANDROID_SRC}/arcore/ARDeclarativeNode_JNI.cpp
@@ -388,7 +390,7 @@ add_library( lib-freetype
              IMPORTED )
 set_target_properties( lib-freetype
                        PROPERTIES IMPORTED_LOCATION
-                       ${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libfreetyped.so )
+                       ${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libfreetype.so )
 
 add_library( lib-protobuf
              STATIC
@@ -424,6 +426,33 @@ add_library( lib-LinearMath
 set_target_properties( lib-LinearMath
                        PROPERTIES IMPORTED_LOCATION
                        ${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libLinearMath.so )
+
+# ── ReactVisionCCA — optional prebuilt proprietary cloud anchor library ───────
+# ReactVisionCCA is built independently (private repo) and deployed to jniLibs/
+# before building ViroCore.  It is OPTIONAL: open-source builds without the .so
+# compile stub implementations that report the feature as unavailable.
+#
+# To enable: run reactvisioncca/scripts/build_android.sh and copy the .so files
+# to android/sharedCode/src/main/jniLibs/{abi}/ before building ViroCore.
+
+set(RVCCA_DIR "${CMAKE_SOURCE_DIR}/../../../reactvisioncca")
+set(RVCCA_SO  "${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libreactvisioncca.so")
+set(RVCCA_HDR "${RVCCA_DIR}/include/ReactVisionCCA/RVCCACloudAnchorProvider.h")
+
+if(EXISTS "${RVCCA_SO}" AND EXISTS "${RVCCA_HDR}")
+    message(STATUS "ReactVisionCCA: FOUND — ReactVision Cloud Anchors ENABLED")
+    include_directories("${RVCCA_DIR}/include")
+    add_library(lib-reactvisioncca SHARED IMPORTED)
+    set_target_properties(lib-reactvisioncca PROPERTIES
+                          IMPORTED_LOCATION "${RVCCA_SO}")
+    set(RVCCA_LINK_LIB lib-reactvisioncca)
+    add_compile_definitions(RVCCA_AVAILABLE=1)
+else()
+    message(STATUS "ReactVisionCCA: NOT FOUND — ReactVision Cloud Anchors DISABLED "
+                   "(deploy libreactvisioncca.so to jniLibs/ to enable)")
+    set(RVCCA_LINK_LIB "")
+    add_compile_definitions(RVCCA_AVAILABLE=0)
+endif()
 
 # Searches for a specified prebuilt library and stores the path as a
 # variable. Because system libraries are included in the search path by
@@ -466,6 +495,8 @@ target_link_libraries( # Specifies the target library.
                        lib-BulletDynamics
                        lib-BulletSoftBody
                        lib-LinearMath
+
+                       ${RVCCA_LINK_LIB}
 
                        cpufeatures
                        ${lib-z}

@@ -506,6 +506,19 @@ public class Material {
     }
 
     /**
+     * Copy constructor - creates a new material copying all properties from the source material.
+     * This includes textures, shader modifiers, and uniforms.
+     *
+     * @param source The material to copy from.
+     */
+    public Material(Material source) {
+        if (source == null) {
+            throw new IllegalArgumentException("Source material cannot be null");
+        }
+        mNativeRef = nativeCopyMaterial(source.mNativeRef);
+    }
+
+    /**
      * Construct a new Material with a passed in ref.
      *
      * @hide
@@ -1174,6 +1187,19 @@ public class Material {
     }
 
     /**
+     * Configure semantic mask on this material. When enabled, fragments are shown or hidden
+     * based on the ARCore scene semantic label at each pixel. Requires scene semantics to be
+     * enabled on the AR session.
+     *
+     * @param enabled   True to enable semantic masking.
+     * @param mode      0 = ShowOnly (render only where label matches), 1 = Hide (hide where label matches).
+     * @param labelMask Bitmask of semantic label values; bit N = label N is selected.
+     */
+    public void setSemanticMaskEnabled(boolean enabled, int mode, int labelMask) {
+        nativeSetSemanticMask(mNativeRef, enabled, mode, labelMask);
+    }
+
+    /**
      * Get the bloom threshold, the brightness at which this Material will begin to bloom. See
      * {@link #setBloomThreshold(float)} for more details.
      *
@@ -1274,7 +1300,144 @@ public class Material {
         return mChromaKeyFilteringColor;
     }
 
+    /**
+     * Add a shader modifier with the specified entry point. Shader modifiers allow custom GLSL
+     * code to be injected at specific points in the rendering pipeline.
+     *
+     * @param entryPoint The entry point where the shader code will be injected (e.g., "geometry",
+     *                   "surface", "fragment", "lightingModel", "vertex", "image").
+     * @param shaderCode The GLSL shader code to inject. May include uniform declarations and body code.
+     */
+    public void addShaderModifier(String entryPoint, String shaderCode) {
+        nativeAddShaderModifier(mNativeRef, entryPoint, shaderCode);
+    }
+
+    /**
+     * Add a GLSL shader modifier with typed varying declarations.
+     *
+     * @param entryPoint             The entry point for injection (e.g., "geometry", "surface", "fragment").
+     * @param shaderCode             The GLSL code to inject.
+     * @param varyings               Array of GLSL type+name pairs (e.g., "highp float displacement").
+     *                               The 'out'/'in' qualifiers are added automatically. May be null.
+     * @param requiresSceneDepth     When true the modifier may sample 'uniform sampler2D scene_depth_texture'.
+     * @param requiresCameraTexture  When true the modifier may sample 'uniform sampler2D camera_texture'.
+     *                               On Android the engine injects the OES extension automatically.
+     */
+    public void addShaderModifier(String entryPoint, String shaderCode, String[] varyings,
+                                   boolean requiresSceneDepth, boolean requiresCameraTexture) {
+        nativeAddShaderModifierWithVaryings(mNativeRef, entryPoint, shaderCode, varyings,
+                requiresSceneDepth, requiresCameraTexture);
+    }
+
+    /**
+     * Add a GLSL shader modifier with typed varying declarations (no scene depth, no camera texture).
+     */
+    public void addShaderModifier(String entryPoint, String shaderCode, String[] varyings, boolean requiresSceneDepth) {
+        nativeAddShaderModifierWithVaryings(mNativeRef, entryPoint, shaderCode, varyings, requiresSceneDepth, false);
+    }
+
+    /**
+     * Add a GLSL shader modifier with typed varying declarations (no special flags).
+     */
+    public void addShaderModifier(String entryPoint, String shaderCode, String[] varyings) {
+        nativeAddShaderModifierWithVaryings(mNativeRef, entryPoint, shaderCode, varyings, false, false);
+    }
+
+    /**
+     * Set a custom float uniform for shader modifiers.
+     *
+     * @param uniformName The name of the uniform variable in the shader code.
+     * @param value The float value to set.
+     */
+    public void setShaderUniform(String uniformName, float value) {
+        nativeSetShaderUniformFloat(mNativeRef, uniformName, value);
+    }
+
+    /**
+     * Set a custom vec3 uniform for shader modifiers.
+     *
+     * @param uniformName The name of the uniform variable in the shader code.
+     * @param x The x component.
+     * @param y The y component.
+     * @param z The z component.
+     */
+    public void setShaderUniform(String uniformName, float x, float y, float z) {
+        nativeSetShaderUniformVec3(mNativeRef, uniformName, x, y, z);
+    }
+
+    /**
+     * Set a custom vec4 uniform for shader modifiers.
+     *
+     * @param uniformName The name of the uniform variable in the shader code.
+     * @param x The x component.
+     * @param y The y component.
+     * @param z The z component.
+     * @param w The w component.
+     */
+    public void setShaderUniform(String uniformName, float x, float y, float z, float w) {
+        nativeSetShaderUniformVec4(mNativeRef, uniformName, x, y, z, w);
+    }
+
+    /**
+     * Set a custom mat4 uniform for shader modifiers.
+     *
+     * @param uniformName The name of the uniform variable in the shader code.
+     * @param matrix A float array containing 16 elements in column-major order.
+     */
+    public void setShaderUniform(String uniformName, float[] matrix) {
+        if (matrix == null || matrix.length != 16) {
+            throw new IllegalArgumentException("Matrix must be a float array with 16 elements");
+        }
+        nativeSetShaderUniformMat4(mNativeRef, uniformName, matrix);
+    }
+
+    /**
+     * Set a custom sampler2D (texture) uniform for shader modifiers.
+     *
+     * @param uniformName The name of the sampler uniform variable in the shader code.
+     * @param texture     The {@link Texture} to bind to this sampler.
+     */
+    public void setShaderUniform(String uniformName, Texture texture) {
+        long nativeRef = (texture != null) ? texture.mNativeRef : 0;
+        nativeSetShaderUniformTexture(mNativeRef, uniformName, nativeRef);
+    }
+
+    /**
+     * Copy all shader uniforms from another material to this material.
+     * Used for shader override uniform synchronization.
+     *
+     * @param sourceMaterial The material to copy uniforms from.
+     */
+    public void copyShaderUniforms(Material sourceMaterial) {
+        if (sourceMaterial == null) {
+            return;
+        }
+        nativeCopyShaderUniforms(mNativeRef, sourceMaterial.mNativeRef);
+    }
+
+    /**
+     * Copy all shader modifiers from another material to this material.
+     * Used for merging shader overrides with existing materials.
+     *
+     * @param sourceMaterial The material to copy shader modifiers from.
+     */
+    public void copyShaderModifiers(Material sourceMaterial) {
+        if (sourceMaterial == null) {
+            return;
+        }
+        nativeCopyShaderModifiers(mNativeRef, sourceMaterial.mNativeRef);
+    }
+
+    /**
+     * Remove all shader modifiers from this material.
+     * This ensures shader modifiers REPLACE instead of STACK when switching shaders.
+     */
+    public void removeAllShaderModifiers() {
+        nativeRemoveAllShaderModifiers(mNativeRef);
+    }
+
     private native long nativeCreateMaterial();
+    private native long nativeCopyMaterial(long sourceNativeRef);
     private native long nativeCreateImmutableMaterial(String lightingModel, long diffuseColor, long diffuseTexture, float diffuseIntensity, long specularTexture,
                                                       float shininess, float fresnelExponent, long normalMap, String cullMode,
                                                       String transparencyMode, String blendMode, float bloomThreshold,
@@ -1294,23 +1457,22 @@ public class Material {
     private native void nativeSetDiffuseIntensity(long nativeRef, float diffuseIntensity);
     private native void nativeDestroyMaterial(long nativeRef);
     private native void nativeSetBloomThreshold(long nativeRef, float bloomThreshold);
+    private native void nativeSetSemanticMask(long nativeRef, boolean enabled, int mode, int labelMask);
     private native void nativeSetShadowMode(long nativeRef, String shadowMode);
     private native void nativeSetName(long nativeRef, String name);
     private native void nativeSetChromaKeyFilteringEnabled(long nativeRef, boolean enabled);
     private native void nativeSetChromaKeyFilteringColor(long nativeRef, int color);
     private native void nativeSetColorWriteMask(long nativeRef, String[] masks);
-    private native void nativeAddShaderModifier(long nativeRef, String entryPoint, String[] codeLines);
-
-    /**
-     * Add a shader modifier to this Material. Shader modifiers inject custom GLSL code at
-     * specific entry points in the rendering pipeline.
-     *
-     * @param entryPoint One of "geometry", "vertex", "surface", "lighting", "fragment".
-     * @param codeLines  Array of GLSL code lines to inject.
-     */
-    public void addShaderModifier(String entryPoint, String[] codeLines) {
-        nativeAddShaderModifier(mNativeRef, entryPoint, codeLines);
-    }
+    private native void nativeAddShaderModifier(long nativeRef, String entryPoint, String shaderCode);
+    private native void nativeAddShaderModifierWithVaryings(long nativeRef, String entryPoint, String shaderCode, String[] varyings, boolean requiresSceneDepth, boolean requiresCameraTexture);
+    private native void nativeSetShaderUniformFloat(long nativeRef, String uniformName, float value);
+    private native void nativeSetShaderUniformVec3(long nativeRef, String uniformName, float x, float y, float z);
+    private native void nativeSetShaderUniformVec4(long nativeRef, String uniformName, float x, float y, float z, float w);
+    private native void nativeSetShaderUniformMat4(long nativeRef, String uniformName, float[] matrix);
+    private native void nativeSetShaderUniformTexture(long nativeRef, String uniformName, long textureNativeRef);
+    private native void nativeCopyShaderUniforms(long destNativeRef, long sourceNativeRef);
+    private native void nativeCopyShaderModifiers(long destNativeRef, long sourceNativeRef);
+    private native void nativeRemoveAllShaderModifiers(long nativeRef);
 
     /**
      * Builder for creating {@link Material} objects.

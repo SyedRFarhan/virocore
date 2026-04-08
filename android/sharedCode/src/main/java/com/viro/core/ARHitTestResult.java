@@ -51,7 +51,13 @@ public class ARHitTestResult {
         /**
          * Indicates a plane was found by the hit-test.
          */
-        PLANE("ExistingPlaneUsingExtent");
+        PLANE("ExistingPlaneUsingExtent"),
+        /**
+         * Indicates a depth point was found by the hit-test using depth data.
+         * Requires depth mode to be enabled in ARCore configuration.
+         * The orientation is perpendicular to the 3D surface at the hit location.
+         */
+        DEPTH_POINT("DepthPoint");
 
         private final String mStringValue;
 
@@ -95,16 +101,27 @@ public class ARHitTestResult {
     private Vector mRotation;
     private ARNode mARNode;
 
+    // Depth-related fields
+    private boolean mHasDepthData;
+    private float mDepthValue;
+    private float mDepthConfidence;
+    private String mDepthSource;
+
     /**
      * Invoked by Native.
      * @hide
      */
-    ARHitTestResult(long nativeRef, String type, float[] position, float[] scale, float[] rotation) {
+    ARHitTestResult(long nativeRef, String type, float[] position, float[] scale, float[] rotation,
+                    boolean hasDepthData, float depthValue, float depthConfidence, String depthSource) {
         mNativeRef = nativeRef;
         mType = Type.valueFromString(type);
         mPosition = new Vector(position);
         mScale = new Vector(scale);
         mRotation = new Vector(rotation);
+        mHasDepthData = hasDepthData;
+        mDepthValue = depthValue;
+        mDepthConfidence = depthConfidence;
+        mDepthSource = depthSource;
     }
 
     @Override
@@ -164,6 +181,45 @@ public class ARHitTestResult {
     }
 
     /**
+     * Returns true if depth data is available for this hit test result.
+     *
+     * @return True if depth data is available, false otherwise.
+     */
+    public boolean hasDepthData() {
+        return mHasDepthData;
+    }
+
+    /**
+     * Get the depth value at the hit point in meters.
+     * Only valid if hasDepthData() returns true.
+     *
+     * @return Depth in meters from the camera to the hit point.
+     */
+    public float getDepthValue() {
+        return mDepthValue;
+    }
+
+    /**
+     * Get the depth confidence value (0-1).
+     * Returns -1 if confidence data is not available.
+     * Only valid if hasDepthData() returns true.
+     *
+     * @return Confidence value between 0 and 1, or -1 if not available.
+     */
+    public float getDepthConfidence() {
+        return mDepthConfidence;
+    }
+
+    /**
+     * Get the source of depth data: "arcore", "lidar", "monocular", or "none".
+     *
+     * @return String indicating the depth data source.
+     */
+    public String getDepthSource() {
+        return mDepthSource;
+    }
+
+    /**
      * Create an {@link ARNode} that will be anchored to the real-world position associated with
      * this hit result. Anchoring a node to a hit-result will help ensure that the objects you
      * attach to this node will track properly and remain in place.
@@ -189,7 +245,7 @@ public class ARHitTestResult {
             if (nodeRef == 0) {
                 return null;
             } else {
-                mARNode = new ARNode(nativeCreateAnchoredNode(mNativeRef));
+                mARNode = new ARNode(nodeRef);
             }
         }
         return mARNode;

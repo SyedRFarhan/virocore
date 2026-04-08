@@ -46,13 +46,13 @@ VROMaterialShaderBinding::VROMaterialShaderBinding(std::shared_ptr<VROShaderProg
     _diffuseSurfaceColorUniform(nullptr),
     _diffuseIntensityUniform(nullptr),
     _alphaUniform(nullptr),
-    _alphaCutoffUniform(nullptr),
     _shininessUniform(nullptr),
     _roughnessUniform(nullptr),
     _roughnessIntensityUniform(nullptr),
     _metalnessUniform(nullptr),
     _metalnessIntensityUniform(nullptr),
     _aoUniform(nullptr),
+    _alphaCutoffUniform(nullptr),
     _emissiveColorUniform(nullptr),
     _normalMatrixUniform(nullptr),
     _modelMatrixUniform(nullptr),
@@ -77,15 +77,15 @@ void VROMaterialShaderBinding::loadUniforms() {
     _diffuseIntensityUniform = program->getUniform("material_diffuse_intensity");
     _diffuseContentsTransformUniform = program->getUniform("material_diffuse_contents_transform");
     _alphaUniform = program->getUniform("material_alpha");
-    _alphaCutoffUniform = program->getUniform("material_alpha_cutoff");
     _shininessUniform = program->getUniform("material_shininess");
     _roughnessUniform = program->getUniform("material_roughness");
     _roughnessIntensityUniform = program->getUniform("material_roughness_intensity");
     _metalnessUniform = program->getUniform("material_metalness");
     _metalnessIntensityUniform = program->getUniform("material_metalness_intensity");
     _aoUniform = program->getUniform("material_ao");
+    _alphaCutoffUniform = program->getUniform("material_alpha_cutoff");
     _emissiveColorUniform = program->getUniform("material_emissive_color");
-    
+
     _normalMatrixUniform = program->getUniform("normal_matrix");
     _modelMatrixUniform = program->getUniform("model_matrix");
     _projectionMatrixUniform = program->getUniform("projection_matrix");
@@ -99,6 +99,12 @@ void VROMaterialShaderBinding::loadUniforms() {
     _arDepthTextureTransformUniform = program->getUniform("ar_depth_texture_transform");
     _occlusionZNearUniform = program->getUniform("occlusion_z_near");
     _occlusionZFarUniform = program->getUniform("occlusion_z_far");
+
+    // AR semantic uniform
+    _arSemanticTextureTransformUniform = program->getUniform("ar_semantic_texture_transform");
+
+    // Camera texture transform (may be null if no modifier uses camera_texture)
+    _cameraImageTransformUniform = program->getUniform("camera_image_transform");
     
     for (const std::shared_ptr<VROShaderModifier> &modifier : program->getModifiers()) {
         std::vector<std::string> uniformNames = modifier->getUniforms();
@@ -165,6 +171,9 @@ void VROMaterialShaderBinding::loadTextures() {
             // This avoids conflict with AO maps on the material.
             _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
         }
+        else if (sampler == "semantic_texture") {
+            _textures.emplace_back(VROGlobalTextureType::SemanticMap);
+        }
         else if (sampler == "emissive_texture") {
             _textures.emplace_back(_material.getEmission().getTexture());
         }
@@ -183,6 +192,62 @@ void VROMaterialShaderBinding::loadTextures() {
         else {
             // Unhandled sampler - this will cause texture binding mismatch!
             pwarn("loadTextures: Unhandled sampler '%s' - texture binding will be incorrect!", sampler.c_str());
+        }
+    }
+
+    // Bind textures for modifier-declared samplers. These follow the standard samplers in
+    // texture unit assignment order and are supplied via VROMaterial::setShaderUniform(name, texture)
+    // or resolved automatically for well-known global sampler names.
+    const std::vector<std::string> &modifierSamplers = _program->getModifierSamplers();
+    const std::map<std::string, std::shared_ptr<VROTexture>> &uniformTextures = _material.getShaderUniformTextures();
+    for (const std::string &samplerName : modifierSamplers) {
+        // Well-known global sampler names are auto-bound from the render context each frame.
+        if (samplerName == "scene_depth_texture") {
+            _textures.emplace_back(VROGlobalTextureType::SceneDepth);
+            continue;
+        }
+        if (samplerName == "camera_texture") {
+            _textures.emplace_back(VROGlobalTextureType::CameraBackground);
+            continue;
+        }
+        if (samplerName == "semantic_texture") {
+            _textures.emplace_back(VROGlobalTextureType::SemanticMap);
+            continue;
+        }
+        if (samplerName == "semantic_confidence_texture") {
+            _textures.emplace_back(VROGlobalTextureType::SemanticConfidence);
+            continue;
+        }
+        // Guard: standard global samplers may be re-declared in modifier uniforms strings.
+        // parseCustomUniforms now skips them (they're already in _samplers), but handle
+        // them here as a belt-and-suspenders fallback so we never push a null local ref.
+        if (samplerName == "ar_depth_texture" || samplerName == "ar_occlusion_depth_texture") {
+            _textures.emplace_back(VROGlobalTextureType::ARDepthMap);
+            continue;
+        }
+        if (samplerName == "shadow_map") {
+            _textures.emplace_back(VROGlobalTextureType::ShadowMap);
+            continue;
+        }
+        if (samplerName == "irradiance_map") {
+            _textures.emplace_back(VROGlobalTextureType::IrradianceMap);
+            continue;
+        }
+        if (samplerName == "prefiltered_map") {
+            _textures.emplace_back(VROGlobalTextureType::PrefilteredMap);
+            continue;
+        }
+        if (samplerName == "brdf_map") {
+            _textures.emplace_back(VROGlobalTextureType::BrdfMap);
+            continue;
+        }
+        auto it = uniformTextures.find(samplerName);
+        if (it != uniformTextures.end()) {
+            _textures.emplace_back(it->second);
+        } else {
+            // No texture assigned yet — push a null reference so that texture unit indices
+            // remain aligned with the sampler unit assignments in findUniformLocations().
+            _textures.emplace_back(std::shared_ptr<VROTexture>(nullptr));
         }
     }
 }
@@ -253,7 +318,45 @@ void VROMaterialShaderBinding::bindMaterialUniforms(const VROMaterial &material,
         if (driver->isLinearRenderingEnabled()) {
             emissiveColor = VROMathConvertSRGBToLinearColor(emissiveColor);
         }
-        _emissiveColorUniform->setVec3({emissiveColor.x, emissiveColor.y, emissiveColor.z});
+        _emissiveColorUniform->setVec3({ emissiveColor.x, emissiveColor.y, emissiveColor.z });
+    }
+
+    // Bind custom shader uniforms (floats, vec3s, vec4s, mat4s)
+
+    // Bind float uniforms
+    std::map<std::string, float> floats = material.getShaderUniformFloats();
+    for (const auto &uniformPair : floats) {
+        VROUniform *uniform = _program->getUniform(uniformPair.first);
+        if (uniform != nullptr) {
+            uniform->setFloat(uniformPair.second);
+        }
+    }
+
+    // Bind vec3 uniforms
+    std::map<std::string, VROVector3f> vec3s = material.getShaderUniformVec3s();
+    for (const auto &uniformPair : vec3s) {
+        VROUniform *uniform = _program->getUniform(uniformPair.first);
+        if (uniform != nullptr) {
+            uniform->setVec3(uniformPair.second);
+        }
+    }
+
+    // Bind vec4 uniforms
+    std::map<std::string, VROVector4f> vec4s = material.getShaderUniformVec4s();
+    for (const auto &uniformPair : vec4s) {
+        VROUniform *uniform = _program->getUniform(uniformPair.first);
+        if (uniform != nullptr) {
+            uniform->setVec4(uniformPair.second);
+        }
+    }
+
+    // Bind mat4 uniforms
+    std::map<std::string, VROMatrix4f> mat4s = material.getShaderUniformMat4s();
+    for (const auto &uniformPair : mat4s) {
+        VROUniform *uniform = _program->getUniform(uniformPair.first);
+        if (uniform != nullptr) {
+            uniform->setMat4(uniformPair.second);
+        }
     }
 }
 
@@ -270,7 +373,19 @@ void VROMaterialShaderBinding::bindGeometryUniforms(float opacity, const VROGeom
 }
 
 void VROMaterialShaderBinding::bindOcclusionUniforms(const VRORenderContext &context) {
-    // Only bind if occlusion is enabled
+    // Semantic texture transform is independent of depth occlusion — bind unconditionally.
+    if (_arSemanticTextureTransformUniform != nullptr) {
+        _arSemanticTextureTransformUniform->setMat4(context.getSemanticTextureTransform());
+    }
+
+    // ar_viewport_size is needed by the semantic mask modifier even without depth occlusion.
+    // If occlusion IS enabled it will be set again below — that's fine, it's the same value.
+    if (_arViewportSizeUniform != nullptr) {
+        VROViewport viewport = context.getViewport();
+        _arViewportSizeUniform->setVec3({(float)viewport.getWidth(), (float)viewport.getHeight(), 0.0f});
+    }
+
+    // Only bind depth-occlusion-specific uniforms if occlusion is enabled
     if (!context.isOcclusionEnabled()) {
         return;
     }
@@ -292,5 +407,11 @@ void VROMaterialShaderBinding::bindOcclusionUniforms(const VRORenderContext &con
     }
     if (_occlusionZFarUniform != nullptr) {
         _occlusionZFarUniform->setFloat(context.getZFar());
+    }
+}
+
+void VROMaterialShaderBinding::bindCameraUniforms(const VRORenderContext &context) {
+    if (_cameraImageTransformUniform != nullptr) {
+        _cameraImageTransformUniform->setMat4(context.getCameraImageTransform());
     }
 }

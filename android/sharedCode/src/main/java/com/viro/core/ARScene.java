@@ -314,6 +314,12 @@ public class ARScene extends Scene {
         void onFailure(String error);
     }
 
+    /** Callback for hosting a geospatial anchor to the ReactVision backend. */
+    public interface HostGeospatialAnchorListener {
+        void onSuccess(String platformUuid);
+        void onFailure(String error);
+    }
+
     /**
      * Callback interface for geospatial pose retrieval.
      */
@@ -429,7 +435,14 @@ public class ARScene extends Scene {
          * people occlusion and may be more efficient than full depth-based occlusion.
          * Requires device support for person segmentation.
          */
-        PEOPLE_ONLY(2);
+        PEOPLE_ONLY(2),
+
+        /**
+         * Activates depth sensing WITHOUT occlusion rendering. Virtual objects will NOT be
+         * occluded by real-world surfaces, but depth data will be available for hit tests
+         * (DepthPoint type) and distance measurement. Requires ARCore Depth API support.
+         */
+        DEPTH_ONLY(3);
 
         private int mTypeId;
         OcclusionMode(int id) {
@@ -450,8 +463,19 @@ public class ARScene extends Scene {
     // Geospatial API state
     private boolean mGeospatialModeEnabled = false;
     private Map<String, GeospatialAnchorListener> mGeospatialAnchorCallbacks = new HashMap<>();
+    private Map<String, HostGeospatialAnchorListener> mHostGeospatialAnchorCallbacks = new HashMap<>();
     private Map<String, VPSAvailabilityListener> mVPSAvailabilityCallbacks = new HashMap<>();
     private GeospatialPoseListener mGeospatialPoseCallback = null;
+
+    /**
+     * Callback for ReactVision geospatial CRUD operations.
+     * jsonData: serialised JSON string (single anchor or array), empty for delete
+     */
+    public interface RvGeospatialCallback {
+        void onResult(boolean success, String jsonData, String error);
+    }
+
+    private Map<String, RvGeospatialCallback> mRvGeospatialCallbacks = new HashMap<>();
 
     /**
      * Construct a new ARScene.
@@ -904,6 +928,14 @@ public class ARScene extends Scene {
      * @param callback The callback to invoke on success or failure.
      * @hide
      */
+    public void setReactVisionConfig(String apiKey, String projectId) {
+        nativeSetReactVisionConfig(mNativeRef, apiKey, projectId);
+    }
+
+    public void setGeospatialAnchorProvider(String provider) {
+        nativeSetGeospatialAnchorProvider(mNativeRef, provider);
+    }
+
     public void hostCloudAnchorById(String anchorId, int ttlDays, CloudAnchorHostListener callback) {
         if (mCloudAnchorHostCallbacks.containsKey(anchorId)) {
             Log.e("Viro", "Ignoring redundant cloud anchor hosting request: we are already processing anchor ["
@@ -922,15 +954,17 @@ public class ARScene extends Scene {
 
     // Called by native
     void onHostSuccess(String originalAnchorId, ARAnchor cloudAnchor, int arNodeId) {
-        CloudAnchorHostListener callback = mCloudAnchorHostCallbacks.get(originalAnchorId);
+        CloudAnchorHostListener callback = mCloudAnchorHostCallbacks.remove(originalAnchorId);
         if (callback != null) {
             ARNode node = null;
-            // arNodeId of 0 means no ARNode was associated (e.g., plane anchors)
+            // arNodeId of 0 means no ARNode was associated (e.g., plane anchors).
+            // ARNode.getARNodeWithID looks up the static nodeARMap populated only by
+            // com.viro.core.ARNode constructors. When the React Native bridge is in use,
+            // nodes are managed by VRTARNode and are not in that map — so we leave node=null
+            // rather than falling back to new ARNode(arNodeId), which would misinterpret
+            // the integer unique-ID as a raw C++ pointer and crash.
             if (arNodeId != 0) {
                 node = ARNode.getARNodeWithID(arNodeId);
-                if (node == null) {
-                    node = new ARNode(arNodeId);
-                }
             }
             callback.onSuccess(cloudAnchor, node);
         } else {
@@ -941,7 +975,7 @@ public class ARScene extends Scene {
 
     // Called by native
     void onHostFailure(String originalAnchorId, String error) {
-        CloudAnchorHostListener callback = mCloudAnchorHostCallbacks.get(originalAnchorId);
+        CloudAnchorHostListener callback = mCloudAnchorHostCallbacks.remove(originalAnchorId);
         if (callback != null) {
             callback.onFailure(error);
         } else {
@@ -991,7 +1025,7 @@ public class ARScene extends Scene {
                     "] does not match requested ID [" + cloudAnchorId + "]!");
         }
 
-        CloudAnchorResolveListener callback = mCloudAnchorResolveCallbacks.get(cloudAnchorId);
+        CloudAnchorResolveListener callback = mCloudAnchorResolveCallbacks.remove(cloudAnchorId);
         if (callback != null) {
             ARNode node = null;
             // arNodeId of 0 means no ARNode was associated (cloud anchors don't have ARNodes by default)
@@ -1010,7 +1044,7 @@ public class ARScene extends Scene {
 
     // Called by native
     void onResolveFailure(String originalAnchorId, String error) {
-        CloudAnchorResolveListener callback = mCloudAnchorResolveCallbacks.get(originalAnchorId);
+        CloudAnchorResolveListener callback = mCloudAnchorResolveCallbacks.remove(originalAnchorId);
         if (callback != null) {
             callback.onFailure(error);
         } else {
@@ -1081,6 +1115,27 @@ public class ARScene extends Scene {
     }
 
     /**
+     * Push the latest device GPS fix into the native session.
+     * Called by the React Native bridge when the ReactVision geospatial provider
+     * is active and a new location is available from Android LocationManager.
+     *
+     * @param lat        Latitude in degrees.
+     * @param lng        Longitude in degrees.
+     * @param alt        Altitude in metres above WGS84 ellipsoid.
+     * @param horizAcc   Horizontal accuracy in metres.
+     * @param vertAcc    Vertical accuracy in metres.
+     * @param heading    Compass bearing in degrees (0 = North, clockwise).
+     * @param headingAcc Heading accuracy in degrees.
+     */
+    public void setLastKnownLocation(double lat, double lng, double alt,
+                                     double horizAcc, double vertAcc,
+                                     double heading, double headingAcc) {
+        if (mNativeRef == 0) return;
+        nativeSetLastKnownLocation(mNativeRef, lat, lng, alt,
+                                   horizAcc, vertAcc, heading, headingAcc);
+    }
+
+    /**
      * Check VPS availability at the specified location.
      *
      * @param latitude  Latitude in degrees.
@@ -1108,6 +1163,40 @@ public class ARScene extends Scene {
         String key = "geo_" + System.nanoTime();
         mGeospatialAnchorCallbacks.put(key, listener);
         nativeCreateGeospatialAnchor(mNativeRef, key, latitude, longitude, altitude,
+                quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    }
+
+    /**
+     * Host a geospatial anchor to the ReactVision backend.
+     * POSTs the GPS coordinates and receives a platform UUID in return.
+     *
+     * @param latitude     Latitude in degrees.
+     * @param longitude    Longitude in degrees.
+     * @param altitude     Altitude in metres above WGS84 ellipsoid.
+     * @param altitudeMode "street_level" or "rooftop_level".
+     * @param listener     Callback receiving the platform UUID or an error.
+     */
+    public void hostGeospatialAnchor(double latitude, double longitude, double altitude,
+                                      String altitudeMode, HostGeospatialAnchorListener listener) {
+        String key = "host_geo_" + System.nanoTime();
+        mHostGeospatialAnchorCallbacks.put(key, listener);
+        nativeHostGeospatialAnchor(mNativeRef, key, latitude, longitude, altitude,
+                altitudeMode != null ? altitudeMode : "street_level");
+    }
+
+    /**
+     * Resolve a geospatial anchor that already exists on the ReactVision platform.
+     * Fetches GPS coordinates from the backend and creates a local AR anchor at that location.
+     *
+     * @param platformUuid The UUID of the anchor on the ReactVision platform.
+     * @param quaternion   Orientation quaternion [x, y, z, w].
+     * @param listener     Callback to receive the anchor or an error.
+     */
+    public void resolveGeospatialAnchor(String platformUuid, float[] quaternion,
+                                         GeospatialAnchorListener listener) {
+        String key = "resolve_" + System.nanoTime();
+        mGeospatialAnchorCallbacks.put(key, listener);
+        nativeResolveGeospatialAnchor(mNativeRef, key, platformUuid,
                 quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
     }
 
@@ -1154,6 +1243,168 @@ public class ARScene extends Scene {
      */
     public void removeGeospatialAnchor(String anchorId) {
         nativeRemoveGeospatialAnchor(mNativeRef, anchorId);
+    }
+
+    /** ReactVision — fetch a single anchor by UUID. */
+    public void rvGetGeospatialAnchor(String anchorId, RvGeospatialCallback callback) {
+        String key = "rvGet_" + System.nanoTime();
+        mRvGeospatialCallbacks.put(key, callback);
+        nativeRvGetGeospatialAnchor(mNativeRef, key, anchorId);
+    }
+
+    /** ReactVision — find anchors within radius metres of the given GPS coordinate. */
+    public void rvFindNearbyGeospatialAnchors(double lat, double lng, double radius, int limit,
+                                               RvGeospatialCallback callback) {
+        String key = "rvNearby_" + System.nanoTime();
+        mRvGeospatialCallbacks.put(key, callback);
+        nativeRvFindNearbyGeospatialAnchors(mNativeRef, key, lat, lng, radius, limit);
+    }
+
+    /** ReactVision — update an anchor (link scene asset / scene / rename / user asset). */
+    public void rvUpdateGeospatialAnchor(String anchorId, String sceneAssetId, String sceneId,
+                                          String name, String userAssetId,
+                                          RvGeospatialCallback callback) {
+        String key = "rvUpdate_" + System.nanoTime();
+        mRvGeospatialCallbacks.put(key, callback);
+        nativeRvUpdateGeospatialAnchor(mNativeRef, key, anchorId,
+                sceneAssetId != null ? sceneAssetId : "",
+                sceneId      != null ? sceneId      : "",
+                name         != null ? name         : "",
+                userAssetId  != null ? userAssetId  : "");
+    }
+
+    /** Callback for ReactVision asset upload operations. */
+    public interface RvUploadAssetCallback {
+        void onResult(boolean success, String userAssetId, String fileUrl, String error);
+    }
+
+    private Map<String, RvUploadAssetCallback> mRvUploadCallbacks = new HashMap<>();
+
+    void onRvUploadResult(String key, boolean success, String userAssetId, String fileUrl, String error) {
+        RvUploadAssetCallback cb = mRvUploadCallbacks.remove(key);
+        if (cb != null) cb.onResult(success, userAssetId, fileUrl, error);
+    }
+
+    /** ReactVision — upload an asset file and return its user_asset_id. */
+    public void rvUploadAsset(String filePath, String assetType, String fileName,
+                               String appUserId, RvUploadAssetCallback callback) {
+        String key = "rvUpload_" + System.nanoTime();
+        mRvUploadCallbacks.put(key, callback);
+        nativeRvUploadAsset(mNativeRef, key,
+                filePath   != null ? filePath   : "",
+                assetType  != null ? assetType  : "",
+                fileName   != null ? fileName   : "",
+                appUserId  != null ? appUserId  : "");
+    }
+
+    /** ReactVision — delete an anchor permanently. */
+    public void rvDeleteGeospatialAnchor(String anchorId, RvGeospatialCallback callback) {
+        String key = "rvDelete_" + System.nanoTime();
+        mRvGeospatialCallbacks.put(key, callback);
+        nativeRvDeleteGeospatialAnchor(mNativeRef, key, anchorId);
+    }
+
+    // Called by native — single callback entry for all four CRUD operations
+    void onRvGeospatialResult(String key, boolean success, String jsonData, String error) {
+        RvGeospatialCallback cb = mRvGeospatialCallbacks.remove(key);
+        if (cb != null) {
+            cb.onResult(success, jsonData, error);
+        }
+    }
+
+    /** Callback for ReactVision geospatial list operation. */
+    public void rvListGeospatialAnchors(int limit, int offset, RvGeospatialCallback callback) {
+        String key = "rvListGeo_" + System.nanoTime();
+        mRvGeospatialCallbacks.put(key, callback);
+        nativeRvListGeospatialAnchors(mNativeRef, key, limit, offset);
+    }
+
+    // ── Cloud anchor management ───────────────────────────────────────────────
+
+    /**
+     * Callback for ReactVision cloud anchor management operations.
+     * jsonData: serialised JSON string (single anchor or array), empty for delete/simple ops
+     */
+    public interface RvCloudAnchorCallback {
+        void onResult(boolean success, String jsonData, String error);
+    }
+
+    private Map<String, RvCloudAnchorCallback> mRvCloudCallbacks = new HashMap<>();
+
+    void onRvCloudAnchorResult(String key, boolean success, String jsonData, String error) {
+        RvCloudAnchorCallback cb = mRvCloudCallbacks.remove(key);
+        if (cb != null) cb.onResult(success, jsonData, error);
+    }
+
+    public void rvGetCloudAnchor(String anchorId, RvCloudAnchorCallback callback) {
+        String key = "rvGetCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvGetCloudAnchor(mNativeRef, key, anchorId);
+    }
+
+    public void rvListCloudAnchors(int limit, int offset, RvCloudAnchorCallback callback) {
+        String key = "rvListCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvListCloudAnchors(mNativeRef, key, limit, offset);
+    }
+
+    public void rvUpdateCloudAnchor(String anchorId, String name, String description,
+                                     boolean isPublic, RvCloudAnchorCallback callback) {
+        String key = "rvUpdateCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvUpdateCloudAnchor(mNativeRef, key, anchorId,
+                name        != null ? name        : "",
+                description != null ? description : "",
+                isPublic);
+    }
+
+    public void rvDeleteCloudAnchor(String anchorId, RvCloudAnchorCallback callback) {
+        String key = "rvDeleteCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvDeleteCloudAnchor(mNativeRef, key, anchorId);
+    }
+
+    public void rvFindNearbyCloudAnchors(double lat, double lng, double radius, int limit,
+                                          RvCloudAnchorCallback callback) {
+        String key = "rvNearbyCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvFindNearbyCloudAnchors(mNativeRef, key, lat, lng, radius, limit);
+    }
+
+    public void rvAttachAssetToCloudAnchor(String anchorId, String fileUrl, long fileSize,
+                                            String name, String assetType, String externalUserId,
+                                            RvCloudAnchorCallback callback) {
+        String key = "rvAttachCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvAttachAssetToCloudAnchor(mNativeRef, key, anchorId, fileUrl, fileSize,
+                name           != null ? name           : "",
+                assetType      != null ? assetType      : "",
+                externalUserId != null ? externalUserId : "");
+    }
+
+    public void rvRemoveAssetFromCloudAnchor(String anchorId, String assetId,
+                                              RvCloudAnchorCallback callback) {
+        String key = "rvRemoveCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvRemoveAssetFromCloudAnchor(mNativeRef, key, anchorId, assetId);
+    }
+
+    public void rvGetSceneAssets(String sceneId, RvCloudAnchorCallback callback) {
+        String key = "rvGetSceneAssets_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvGetSceneAssets(mNativeRef, key, sceneId);
+    }
+
+    public void rvTrackCloudAnchorResolution(String anchorId, boolean success, double confidence,
+                                              int matchCount, int inlierCount, int processingTimeMs,
+                                              String platform, String externalUserId,
+                                              RvCloudAnchorCallback callback) {
+        String key = "rvTrackCloud_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvTrackCloudAnchorResolution(mNativeRef, key, anchorId, success, confidence,
+                matchCount, inlierCount, processingTimeMs,
+                platform       != null ? platform       : "",
+                externalUserId != null ? externalUserId : "");
     }
 
     // Called by native - Geospatial pose result
@@ -1245,6 +1496,22 @@ public class ARScene extends Scene {
         if (callback != null) {
             callback.onFailure(error);
             mGeospatialAnchorCallbacks.remove(key);
+        }
+    }
+
+    void onHostGeospatialAnchorSuccess(String key, String platformUuid) {
+        HostGeospatialAnchorListener callback = mHostGeospatialAnchorCallbacks.get(key);
+        if (callback != null) {
+            callback.onSuccess(platformUuid);
+            mHostGeospatialAnchorCallbacks.remove(key);
+        }
+    }
+
+    void onHostGeospatialAnchorFailure(String key, String error) {
+        HostGeospatialAnchorListener callback = mHostGeospatialAnchorCallbacks.get(key);
+        if (callback != null) {
+            callback.onFailure(error);
+            mHostGeospatialAnchorCallbacks.remove(key);
         }
     }
 
@@ -1366,6 +1633,8 @@ public class ARScene extends Scene {
     private native void nativeRemoveARImageTargetDeclarative(long sceneControllerRef, long arImageTargetRef);
     private native void nativeHostCloudAnchor(long sceneControllerRef, String anchorId, int ttlDays);
     private native void nativeResolveCloudAnchor(long sceneControllerRef, String cloudAnchorId);
+    private native void nativeSetReactVisionConfig(long sceneControllerRef, String apiKey, String projectId);
+    private native void nativeSetGeospatialAnchorProvider(long sceneControllerRef, String provider);
     private native float nativeGetAmbientLightIntensity(long sceneControllerRef);
     private native long nativeCreateAnchoredNode(long sceneControllerRef, float px, float py, float pz,
                                                  float qx, float qy, float qz, float qw);
@@ -1379,10 +1648,20 @@ public class ARScene extends Scene {
     private native void nativeSetGeospatialModeEnabled(long sceneControllerRef, boolean enabled);
     private native int nativeGetEarthTrackingState(long sceneControllerRef);
     private native void nativeGetCameraGeospatialPose(long sceneControllerRef);
+    private native void nativeSetLastKnownLocation(long sceneControllerRef,
+                                                   double lat, double lng, double alt,
+                                                   double horizAcc, double vertAcc,
+                                                   double heading, double headingAcc);
     private native void nativeCheckVPSAvailability(long sceneControllerRef, double latitude, double longitude);
     private native void nativeCreateGeospatialAnchor(long sceneControllerRef, String key,
                                                       double latitude, double longitude, double altitude,
                                                       float qx, float qy, float qz, float qw);
+    private native void nativeHostGeospatialAnchor(long sceneControllerRef, String key,
+                                                    double latitude, double longitude, double altitude,
+                                                    String altitudeMode);
+    private native void nativeResolveGeospatialAnchor(long sceneControllerRef, String key,
+                                                       String platformUuid,
+                                                       float qx, float qy, float qz, float qw);
     private native void nativeCreateTerrainAnchor(long sceneControllerRef, String key,
                                                    double latitude, double longitude, double altitudeAboveTerrain,
                                                    float qx, float qy, float qz, float qw);
@@ -1390,6 +1669,45 @@ public class ARScene extends Scene {
                                                    double latitude, double longitude, double altitudeAboveRooftop,
                                                    float qx, float qy, float qz, float qw);
     private native void nativeRemoveGeospatialAnchor(long sceneControllerRef, String anchorId);
+    private native void nativeRvGetGeospatialAnchor(long sceneControllerRef, String key, String anchorId);
+    private native void nativeRvFindNearbyGeospatialAnchors(long sceneControllerRef, String key,
+                                                             double lat, double lng,
+                                                             double radius, int limit);
+    private native void nativeRvUpdateGeospatialAnchor(long sceneControllerRef, String key,
+                                                        String anchorId, String sceneAssetId,
+                                                        String sceneId, String name,
+                                                        String userAssetId);
+    private native void nativeRvUploadAsset(long sceneControllerRef, String key,
+                                             String filePath, String assetType,
+                                             String fileName, String appUserId);
+    private native void nativeRvDeleteGeospatialAnchor(long sceneControllerRef, String key,
+                                                        String anchorId);
+    private native void nativeRvListGeospatialAnchors(long sceneControllerRef, String key,
+                                                       int limit, int offset);
+
+    // Cloud anchor management native methods
+    private native void nativeRvGetCloudAnchor(long sceneControllerRef, String key, String anchorId);
+    private native void nativeRvListCloudAnchors(long sceneControllerRef, String key,
+                                                  int limit, int offset);
+    private native void nativeRvUpdateCloudAnchor(long sceneControllerRef, String key,
+                                                   String anchorId, String name,
+                                                   String description, boolean isPublic);
+    private native void nativeRvDeleteCloudAnchor(long sceneControllerRef, String key, String anchorId);
+    private native void nativeRvFindNearbyCloudAnchors(long sceneControllerRef, String key,
+                                                        double lat, double lng,
+                                                        double radius, int limit);
+    private native void nativeRvGetSceneAssets(long sceneControllerRef, String key, String sceneId);
+    private native void nativeRvAttachAssetToCloudAnchor(long sceneControllerRef, String key,
+                                                          String anchorId, String fileUrl,
+                                                          long fileSize, String name,
+                                                          String assetType, String externalUserId);
+    private native void nativeRvRemoveAssetFromCloudAnchor(long sceneControllerRef, String key,
+                                                            String anchorId, String assetId);
+    private native void nativeRvTrackCloudAnchorResolution(long sceneControllerRef, String key,
+                                                            String anchorId, boolean success,
+                                                            double confidence, int matchCount,
+                                                            int inlierCount, int processingTimeMs,
+                                                            String platform, String externalUserId);
 
     // Scene Semantics API native methods
     private native boolean nativeIsSemanticModeSupported(long sceneControllerRef);

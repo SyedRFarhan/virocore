@@ -48,6 +48,8 @@ enum class VROARDisplayRotation {
 
 class VRODriverOpenGL;
 class VROCloudAnchorProviderARCore;
+class VROCloudAnchorProviderReactVision;
+namespace ReactVisionCCA { class RVCCAGeospatialProvider; }
 
 class VROARSessionARCore : public VROARSession,
                            public std::enable_shared_from_this<VROARSessionARCore> {
@@ -74,6 +76,23 @@ public:
     void setDelegate(std::shared_ptr<VROARSessionDelegate> delegate);
     bool setAnchorDetection(std::set<VROAnchorDetection> types);
     void setCloudAnchorProvider(VROCloudAnchorProvider provider);
+
+    /*
+     Configure the ReactVision backend credentials.
+     Must be called before setCloudAnchorProvider(ReactVision).
+     Reads RVApiKey / RVProjectId from AndroidManifest meta-data if not called.
+     */
+    void setReactVisionConfig(const std::string &apiKey, const std::string &projectId);
+
+    /*
+     Update the cached GPS pose used by getCameraGeospatialPose() when the
+     ReactVision geospatial provider is active. Called from Java via JNI each
+     time the Android LocationManager delivers a new fix.
+     */
+    void setLastKnownLocation(double lat, double lng, double alt,
+                              double horizAcc, double vertAcc,
+                              double heading, double headingAcc);
+    void getLastKnownLocation(double& lat, double& lng, double& alt) const;
     void setAutofocus(bool enabled);
     bool isCameraAutoFocusEnabled();
 
@@ -140,6 +159,7 @@ public:
     /*
      Geospatial API.
      */
+    void setGeospatialAnchorProvider(VROGeospatialAnchorProvider provider) override;
     bool isGeospatialModeSupported() const override;
     void setGeospatialModeEnabled(bool enabled) override;
     VROEarthTrackingState getEarthTrackingState() const override;
@@ -150,6 +170,13 @@ public:
                                 VROQuaternion quaternion,
                                 std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
                                 std::function<void(std::string error)> onFailure) override;
+    void resolveGeospatialAnchor(const std::string& platformUuid, VROQuaternion quaternion,
+                                  std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
+                                  std::function<void(std::string error)> onFailure) override;
+    void hostGeospatialAnchor(double latitude, double longitude, double altitude,
+                               const std::string& altitudeMode,
+                               std::function<void(std::string platformUuid)> onSuccess,
+                               std::function<void(std::string error)> onFailure) override;
     void createTerrainAnchor(double latitude, double longitude, double altitudeAboveTerrain,
                              VROQuaternion quaternion,
                              std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
@@ -159,6 +186,46 @@ public:
                              std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
                              std::function<void(std::string error)> onFailure) override;
     void removeGeospatialAnchor(std::shared_ptr<VROGeospatialAnchor> anchor) override;
+    void rvGetGeospatialAnchor(const std::string& anchorId,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvFindNearbyGeospatialAnchors(double lat, double lng, double radius, int limit,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvUpdateGeospatialAnchor(const std::string& anchorId,
+        const std::string& sceneAssetId, const std::string& sceneId, const std::string& name,
+        const std::string& userAssetId,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvUploadAsset(const std::string& filePath, const std::string& assetType,
+        const std::string& fileName, const std::string& appUserId,
+        std::function<void(bool, std::string, std::string, std::string)> callback) override;
+    void rvDeleteGeospatialAnchor(const std::string& anchorId,
+        std::function<void(bool, std::string)> callback) override;
+    void rvListGeospatialAnchors(int limit, int offset,
+        std::function<void(bool, std::string, std::string)> callback) override;
+
+    // Cloud anchor management
+    void rvGetCloudAnchor(const std::string& anchorId,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvListCloudAnchors(int limit, int offset,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvUpdateCloudAnchor(const std::string& anchorId, const std::string& name,
+        const std::string& description, bool isPublic,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvDeleteCloudAnchor(const std::string& anchorId,
+        std::function<void(bool, std::string)> callback) override;
+    void rvFindNearbyCloudAnchors(double lat, double lng, double radius, int limit,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvAttachAssetToCloudAnchor(const std::string& anchorId, const std::string& fileUrl,
+        int64_t fileSize, const std::string& name, const std::string& assetType,
+        const std::string& externalUserId,
+        std::function<void(bool, std::string)> callback) override;
+    void rvRemoveAssetFromCloudAnchor(const std::string& anchorId, const std::string& assetId,
+        std::function<void(bool, std::string)> callback) override;
+    void rvTrackCloudAnchorResolution(const std::string& anchorId, bool success,
+        double confidence, int matchCount, int inlierCount, int processingTimeMs,
+        const std::string& platform, const std::string& externalUserId,
+        std::function<void(bool, std::string)> callback) override;
+    void rvGetSceneAssets(const std::string& sceneId,
+        std::function<void(bool, std::string, std::string)> callback) override;
 
     /*
      * Scene Semantics API.
@@ -186,6 +253,14 @@ public:
      Initialize the camera background texture and install it on the ARCore session.
      */
     void initCameraTexture(std::shared_ptr<VRODriverOpenGL> driver);
+
+    /*
+     Invalidate the camera texture after an EGL context loss. Resets the texture ID to 0
+     and releases the backing VROTexture without calling any GL delete functions (the old
+     context is already gone). initCameraTexture() will allocate fresh GL objects in the
+     new context on the next renderFrame().
+     */
+    void invalidateCameraTexture();
 
     void setDisplayGeometry(VROARDisplayRotation rotation, int width, int height);
     VROARDisplayRotation getDisplayRotation() const {  return _displayRotation; }
@@ -283,9 +358,29 @@ private:
     std::map<std::string, std::shared_ptr<VROARAnchorARCore>> _nativeAnchorMap;
 
     /*
-     Hosts and resolves cloud anchors.
+     Hosts and resolves cloud anchors via ARCore.
      */
     std::shared_ptr<VROCloudAnchorProviderARCore> _cloudAnchorProvider;
+
+    /*
+     Hosts and resolves cloud anchors via ReactVision backend.
+     Active when setCloudAnchorProvider(ReactVision) is called.
+     */
+    std::shared_ptr<VROCloudAnchorProviderReactVision> _cloudAnchorProviderRV;
+    std::string _rvApiKey;
+    std::string _rvProjectId;
+
+    /*
+     Manages geospatial anchors via ReactVision backend.
+     Active when setGeospatialAnchorProvider(ReactVision) is called.
+     */
+    std::shared_ptr<ReactVisionCCA::RVCCAGeospatialProvider> _geospatialProviderRV;
+
+    /*
+     Last GPS location pushed from Java LocationManager (ReactVision provider path).
+     Updated via setLastKnownLocation(); read via getCameraGeospatialPose().
+     */
+    mutable VROGeospatialPose _lastKnownGPSPose;
 
     /*
      Per-frame anchor and trackable update handling.
@@ -344,8 +439,36 @@ private:
     std::vector<float> _depthFloatBuffer; // Reusable buffer for depth conversion
     void updateDepthTexture();
 
+    /*
+     Semantic label texture (R8, per-pixel label 0-11).
+     Pixels with confidence below _semanticConfidenceThreshold are set to label 0 (unlabeled)
+     before upload, reducing noise at segmentation boundaries.
+     Temporal holdout is applied so pixels don't flicker to unlabeled for isolated frames.
+     */
+    std::shared_ptr<VROTexture> _semanticTexture;
+    float _semanticConfidenceThreshold = 0.0f;
+
+    /*
+     Confidence texture (R8, 0=uncertain, 255=certain) paired with _semanticTexture.
+     Always non-null once the first semantic frame arrives (initialised to 1×1 white).
+     */
+    std::shared_ptr<VROTexture> _semanticConfidenceTexture;
+
+    /*
+     Per-pixel holdout buffers for temporal anti-flicker.
+     When a pixel transitions label→unlabeled for a single frame, the previous label
+     and a decayed confidence value are held, suppressing boundary flicker.
+     */
+    std::vector<uint8_t> _prevSemanticData;
+    std::vector<uint8_t> _prevConfidenceData;
+
+    void updateSemanticTexture();
+
 public:
     std::shared_ptr<VROTexture> getDepthTexture() { return _depthTexture; }
+    std::shared_ptr<VROTexture> getSemanticTexture() { return _semanticTexture; }
+    std::shared_ptr<VROTexture> getSemanticConfidenceTexture() override { return _semanticConfidenceTexture; }
+    void setSemanticConfidenceThreshold(float threshold) { _semanticConfidenceThreshold = threshold; }
 
 };
 

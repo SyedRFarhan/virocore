@@ -56,13 +56,30 @@ public:
     VROMaterialSubstrateMetal(const VROMaterial &material,
                               VRODriverMetal &driver);
     virtual ~VROMaterialSubstrateMetal();
-    
+
+    // Override VROMaterialSubstrate virtual methods
+    bool bindShader(int lightsHash,
+                    const std::vector<std::shared_ptr<VROLight>> &lights,
+                    const VRORenderContext &context,
+                    std::shared_ptr<VRODriver> &driver) override;
+    void bindProperties(std::shared_ptr<VRODriver> &driver) override;
+    void bindGeometry(float opacity, const VROGeometry &geometry) override;
+    void bindView(VROMatrix4f modelMatrix, VROMatrix4f viewMatrix,
+                  VROMatrix4f projectionMatrix, VROMatrix4f normalMatrix,
+                  VROVector3f cameraPosition, VROEyeType eyeType,
+                  const VRORenderContext &context) override;
+    void updateTextures() override;
+    void updateSortKey(VROSortKey &key, const std::vector<std::shared_ptr<VROLight>> &lights,
+                       const VRORenderContext &context,
+                       std::shared_ptr<VRODriver> driver) override;
+
+    // Metal-specific methods
     void bindShader();
     void bindLights(int lightsHash,
                     const std::vector<std::shared_ptr<VROLight>> &lights,
                     const VRORenderContext &context,
                     std::shared_ptr<VRODriver> &driver);
-    
+
     /*
      Set the uniforms required to render this material, and return the buffer.
      */
@@ -78,14 +95,40 @@ public:
         return _textures;
     }
     
-    void updateSortKey(VROSortKey &key) const;
+    VROConcurrentBuffer *getCustomUniformsBuffer() const {
+        return _customUniformsBuffer;
+    }
     
 private:
-    
+    struct VROUniformLayout {
+        std::vector<std::string> floats;
+        std::vector<std::string> vec3s;
+        std::vector<std::string> vec4s;
+        std::vector<std::string> mat4s;
+    };
+    VROUniformLayout _customLayout;
+
+    id <MTLLibrary> _dynamicLibrary;
+
     static std::shared_ptr<VROMetalShader> getPooledShader(std::string vertexShader,
                                                            std::string fragmentShader,
                                                            id <MTLLibrary> library);
     
+    void loadConstantLighting(const VROMaterial &material,
+                              id <MTLLibrary> library, id <MTLDevice> device,
+                              VRODriverMetal &driver);
+    void loadLambertLighting(const VROMaterial &material,
+                             id <MTLLibrary> library, id <MTLDevice> device,
+                             VRODriverMetal &driver);
+    void loadPhongLighting(const VROMaterial &material,
+                           id <MTLLibrary> library, id <MTLDevice> device,
+                           VRODriverMetal &driver);
+    void loadBlinnLighting(const VROMaterial &material,
+                           id <MTLLibrary> library, id <MTLDevice> device,
+                           VRODriverMetal &driver);
+
+    void inflateModifiers(std::string &source, const std::vector<std::shared_ptr<VROShaderModifier>> &modifiers);
+
     const VROMaterial &_material;
     VROLightingModel _lightingModel;
     
@@ -93,21 +136,9 @@ private:
     
     VROConcurrentBuffer *_materialUniformsBuffer;
     VROConcurrentBuffer *_lightingUniformsBuffer;
+    VROConcurrentBuffer *_customUniformsBuffer;
     
     std::vector<std::shared_ptr<VROTexture>> _textures;
-    
-    void loadConstantLighting(const VROMaterial &material,
-                              id <MTLLibrary> library, id <MTLDevice> device,
-                              VRODriverMetal &driver);
-    void loadBlinnLighting(const VROMaterial &material,
-                           id <MTLLibrary> library, id <MTLDevice> device,
-                           VRODriverMetal &driver);
-    void loadPhongLighting(const VROMaterial &material,
-                           id <MTLLibrary> library, id <MTLDevice> device,
-                           VRODriverMetal &driver);
-    void loadLambertLighting(const VROMaterial &material,
-                             id <MTLLibrary> library, id <MTLDevice> device,
-                             VRODriverMetal &driver);
     
     void bindConstantLighting(const std::shared_ptr<VROLight> &light);
     void bindBlinnLighting(const std::shared_ptr<VROLight> &light);

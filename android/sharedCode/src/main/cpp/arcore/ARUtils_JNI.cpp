@@ -48,10 +48,25 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
     const char *anchorId_c = anchor->getId().c_str();
     VRO_STRING anchorId = VRO_NEW_STRING(anchorId_c);
 
-    // Get cloud anchor ID only if this is a VROARAnchorARCore (not a geospatial anchor)
+    // Resolve the cloud anchor ID string for both the Google ARCore and RVCA code paths.
+    //
+    // VROARAnchorARCore::getCloudAnchorId() reads its own _cloudAnchorId field, which is
+    // populated by loadCloudAnchorId() (Google ARCore cloud-anchors hosting path).
+    //
+    // The RVCA provider sets the id via VROARAnchor::setCloudAnchorId() on the BASE class.
+    // For RVCA-hosted anchors the cast succeeds (still a VROARAnchorARCore) but the derived
+    // field is empty, so we fall back to the base-class field.
+    // For RVCA-resolved anchors the cast FAILS because RVCA creates a plain VROARAnchor —
+    // in that case we read the base-class field directly via the base-class method.
     VRO_STRING cloudAnchorId = NULL;
-    if (vAnchor) {
-        std::string cloudAnchorId_s = vAnchor->getCloudAnchorId();
+    {
+        std::string cloudAnchorId_s;
+        if (vAnchor) {
+            cloudAnchorId_s = vAnchor->getCloudAnchorId();   // VROARAnchorARCore field (Google path)
+        }
+        if (cloudAnchorId_s.empty()) {
+            cloudAnchorId_s = anchor->getCloudAnchorId();    // VROARAnchor base-class field (RVCA path)
+        }
         if (!cloudAnchorId_s.empty()) {
             cloudAnchorId = VRO_NEW_STRING(cloudAnchorId_s.c_str());
         }
@@ -66,17 +81,14 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
     VRO_FLOAT_ARRAY scaleArray = ARUtilsCreateFloatArrayFromVector3f(transform.extractScale());
 
 
-    // Check for plane and image anchors only if this is a VROARAnchorARCore (has trackable)
+    // Build the Java anchor object.  ARPlaneAnchor and ARImageAnchor constructors
+    // don't take cloudAnchorId, so we set it via JNI field access after construction.
+    VRO_OBJECT result = NULL;
+
     if (vAnchor) {
-        // Create an ARPlaneAnchor if necessary and return.
+        // Create an ARPlaneAnchor if necessary.
         std::shared_ptr<VROARPlaneAnchor> plane = std::dynamic_pointer_cast<VROARPlaneAnchor>(vAnchor->getTrackable());
         if (plane) {
-            /*
-             ARPlaneAnchor's constructor has the following args:
-             String anchorId, String type, float[] position, float[] rotation,
-             float[] scale, String alignment, float[] extent, float[] center,
-             float[] boundaryVertices, String classification
-             */
             VRO_STRING alignment = ARUtilsCreateStringFromAlignment(plane->getAlignment());
             VRO_STRING classification = ARUtilsCreateStringFromClassification(plane->getClassification());
             VRO_FLOAT_ARRAY extentArray = ARUtilsCreateFloatArrayFromVector3f(plane->getExtent());
@@ -86,52 +98,63 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
             const char *typeArr = "plane";
             VRO_STRING type = VRO_NEW_STRING(typeArr);
 
-            return VROPlatformConstructHostObject("com/viro/core/ARPlaneAnchor", "(Ljava/lang/String;Ljava/lang/String;[F[F[FLjava/lang/String;[F[F[FLjava/lang/String;)V",
+            result = VROPlatformConstructHostObject("com/viro/core/ARPlaneAnchor", "(Ljava/lang/String;Ljava/lang/String;[F[F[FLjava/lang/String;[F[F[FLjava/lang/String;)V",
                                                   anchorId, type, positionArray, rotationArray,
                                                   scaleArray, alignment, extentArray, centerArray,
                                                   polygonPointsArray, classification);
         }
 
-        // Create an ARImageAnchor if necessary and return.
-        std::shared_ptr<VROARImageAnchor> imageAnchor = std::dynamic_pointer_cast<VROARImageAnchor>(vAnchor->getTrackable());
-        if (imageAnchor) {
-            /*
-             ARImageAnchor's constructor has the following args:
-             String anchorId, String type, float[] position, float[] rotation, float[] scale
-             */
-            const char *typeArr = "image";
-            VRO_STRING type = VRO_NEW_STRING(typeArr);
+        // Create an ARImageAnchor if necessary.
+        if (!result) {
+            std::shared_ptr<VROARImageAnchor> imageAnchor = std::dynamic_pointer_cast<VROARImageAnchor>(vAnchor->getTrackable());
+            if (imageAnchor) {
+                const char *typeArr = "image";
+                VRO_STRING type = VRO_NEW_STRING(typeArr);
 
-            VRO_STRING trackingMethod;
-            switch(imageAnchor->getTrackingMethod()) {
-                case VROARImageTrackingMethod::NotTracking:
-                    trackingMethod = VRO_NEW_STRING("notTracking");
-                    break;
-                case VROARImageTrackingMethod::Tracking:
-                    trackingMethod = VRO_NEW_STRING("tracking");
-                    break;
-                case VROARImageTrackingMethod::LastKnownPose:
-                    trackingMethod = VRO_NEW_STRING("lastKnownPose");
-                    break;
+                VRO_STRING trackingMethod;
+                switch(imageAnchor->getTrackingMethod()) {
+                    case VROARImageTrackingMethod::NotTracking:
+                        trackingMethod = VRO_NEW_STRING("notTracking");
+                        break;
+                    case VROARImageTrackingMethod::Tracking:
+                        trackingMethod = VRO_NEW_STRING("tracking");
+                        break;
+                    case VROARImageTrackingMethod::LastKnownPose:
+                        trackingMethod = VRO_NEW_STRING("lastKnownPose");
+                        break;
+                }
+
+                result = VROPlatformConstructHostObject("com/viro/core/ARImageAnchor", "(Ljava/lang/String;Ljava/lang/String;[F[F[FLjava/lang/String;)V",
+                                                      anchorId, type, positionArray, rotationArray,
+                                                      scaleArray, trackingMethod);
             }
-
-            return VROPlatformConstructHostObject("com/viro/core/ARImageAnchor", "(Ljava/lang/String;Ljava/lang/String;[F[F[FLjava/lang/String;)V",
-                                                  anchorId, type, positionArray, rotationArray,
-                                                  scaleArray, trackingMethod);
         }
     }
 
-    // Otherwise this anchor has no associated trackable: create a normal ARAnchor object and return it
-    /*
-     ARAnchor's constructor has the following args:
-     String anchorId, String type, float[] position, float[] rotation, float[] scale
-     */
-    const char *typeArr = "anchor";
-    VRO_STRING type = VRO_NEW_STRING(typeArr);
-    return VROPlatformConstructHostObject("com/viro/core/ARAnchor",
-                                          "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[F[F[F)V",
-                                          anchorId, cloudAnchorId, type, positionArray, rotationArray,
-                                          scaleArray);
+    // Fallback: create a normal ARAnchor.
+    if (!result) {
+        const char *typeArr = "anchor";
+        VRO_STRING type = VRO_NEW_STRING(typeArr);
+        result = VROPlatformConstructHostObject("com/viro/core/ARAnchor",
+                                              "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[F[F[F)V",
+                                              anchorId, cloudAnchorId, type, positionArray, rotationArray,
+                                              scaleArray);
+    }
+
+    // Set cloudAnchorId on ANY anchor type (ARPlaneAnchor/ARImageAnchor extend
+    // ARAnchor but their constructors don't take cloudAnchorId).
+    if (result && cloudAnchorId) {
+        jclass arAnchorCls = env->FindClass("com/viro/core/ARAnchor");
+        if (arAnchorCls) {
+            jfieldID fid = env->GetFieldID(arAnchorCls, "mCloudAnchorId", "Ljava/lang/String;");
+            if (fid) {
+                env->SetObjectField(result, fid, cloudAnchorId);
+            }
+            env->DeleteLocalRef(arAnchorCls);
+        }
+    }
+
+    return result;
 }
 
 VRO_STRING ARUtilsCreateStringFromAlignment(VROARPlaneAlignment alignment) {
@@ -209,10 +232,13 @@ VRO_OBJECT ARUtilsCreateARHitTestResult(std::shared_ptr<VROARHitTestResult> resu
     VRO_FLOAT_ARRAY_SET(jrotation, 0, 3, rotation);
 
     const char *type;
-    // Note: ARCore currently only supports Plane & FeaturePoint. See VROARFrameARCore::hitTest.
+    // Note: ARCore supports Plane, FeaturePoint, and DepthPoint. See VROARFrameARCore::hitTest.
     switch (result->getType()) {
         case VROARHitTestResultType::ExistingPlaneUsingExtent:
             type = "ExistingPlaneUsingExtent";
+            break;
+        case VROARHitTestResultType::DepthPoint:
+            type = "DepthPoint";
             break;
         default: // FeaturePoint
             type = "FeaturePoint";
@@ -220,10 +246,18 @@ VRO_OBJECT ARUtilsCreateARHitTestResult(std::shared_ptr<VROARHitTestResult> resu
     }
 
     jtype = VRO_NEW_STRING(type);
+
+    // Add depth data if available
+    jboolean hasDepthData = result->hasDepthData();
+    jfloat depthValue = result->getDepthValue();
+    jfloat depthConfidence = result->getDepthConfidence();
+    jstring depthSource = VRO_NEW_STRING(result->getDepthSource().c_str());
+
     VRO_REF(VROARHitTestResult) ref = VRO_REF_NEW(VROARHitTestResult, result);
     return VROPlatformConstructHostObject("com/viro/core/ARHitTestResult",
-                                          "(JLjava/lang/String;[F[F[F)V",
-                                          ref, jtype, jposition, jscale, jrotation);
+                                          "(JLjava/lang/String;[F[F[FZFFLjava/lang/String;)V",
+                                          ref, jtype, jposition, jscale, jrotation,
+                                          hasDepthData, depthValue, depthConfidence, depthSource);
 }
 
 VRO_OBJECT ARUtilsCreateARPointCloud(std::shared_ptr<VROARPointCloud> pointCloud) {

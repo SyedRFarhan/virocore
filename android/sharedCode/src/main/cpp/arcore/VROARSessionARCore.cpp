@@ -34,6 +34,16 @@
 #include "VROARPlaneAnchor.h"
 #include "VROCameraTexture.h"
 #include "VROCloudAnchorProviderARCore.h"
+#include "VROCloudAnchorProviderReactVision.h"
+#include <fstream>
+
+#ifndef RVCCA_AVAILABLE
+#  define RVCCA_AVAILABLE 0
+#endif
+#if RVCCA_AVAILABLE
+#  include "ReactVisionCCA/RVCCAGeospatialProvider.h"
+#  include "ReactVisionCCA/RVCCACloudAnchorProvider.h"
+#endif
 #include "VRODriver.h"
 #include "VROFrameSynchronizer.h"
 #include "VROLog.h"
@@ -44,8 +54,33 @@
 #include "VROTextureSubstrateOpenGL.h"
 #include <VROImageAndroid.h>
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 
 static bool kDebugTracking = false;
+
+// Generate a random UUID v4 string (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx).
+static std::string generateUUID() {
+    uint8_t b[16];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        read(fd, b, sizeof(b));
+        close(fd);
+    } else {
+        // Fallback: zero-filled (shouldn't happen on Android).
+        memset(b, 0, sizeof(b));
+    }
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant bits
+    char buf[37];
+    snprintf(buf, sizeof(buf),
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7],
+             b[8],b[9], b[10],b[11],b[12],b[13],b[14],b[15]);
+    return std::string(buf);
+}
 
 // Minimum plane size filter to prevent small artifacts from being detected
 // Planes smaller than this threshold will be ignored
@@ -58,7 +93,7 @@ VROARSessionARCore::VROARSessionARCore(std::shared_ptr<VRODriverOpenGL> driver)
       _updateMode(arcore::UpdateMode::Blocking),
       _cloudAnchorMode(arcore::CloudAnchorMode::Enabled),
       _focusMode(arcore::FocusMode::FIXED_FOCUS),
-      _depthMode(arcore::DepthMode::Automatic),
+      _depthMode(arcore::DepthMode::Disabled),
       _semanticMode(arcore::SemanticMode::Disabled),
       _geospatialMode(arcore::GeospatialMode::Disabled),
       _cameraTextureId(0),
@@ -91,8 +126,31 @@ GLuint VROARSessionARCore::getCameraTextureId() const {
   return _cameraTextureId;
 }
 
+void VROARSessionARCore::invalidateCameraTexture() {
+  // The EGL context that owned _cameraTextureId has already been destroyed.
+  // Do NOT call glDeleteTextures — the ID is invalid in the new context and
+  // the old context is gone, so there is nothing to release on the GPU side.
+  // Simply forget the ID and the backing texture so initCameraTexture() will
+  // allocate fresh GL objects in the new context on the next renderFrame().
+  _cameraTextureId = 0;
+  _background.reset();
+  pinfo("AR camera texture invalidated after EGL context loss");
+}
+
 void VROARSessionARCore::initCameraTexture(
     std::shared_ptr<VRODriverOpenGL> driver) {
+  passert_msg(_session != nullptr,
+              "ARCore must be installed before setting camera texture");
+
+  // If the camera texture already exists (e.g. AR→AR scene switch on the same renderer),
+  // reuse it rather than leaking the old GL texture and creating a new one.
+  // Re-registering satisfies the ARCore requirement to call setCameraTextureName after
+  // every pause/resume cycle.
+  if (_cameraTextureId != 0) {
+    _session->setCameraTextureName(_cameraTextureId);
+    return;
+  }
+
   // Generate the background texture
   glGenTextures(1, &_cameraTextureId);
 
@@ -109,8 +167,6 @@ void VROARSessionARCore::initCameraTexture(
                                              VROTextureInternalFormat::RGBA8,
                                              std::move(substrate));
 
-  passert_msg(_session != nullptr,
-              "ARCore must be installed before setting camera texture");
   _session->setCameraTextureName(_cameraTextureId);
 }
 
@@ -153,6 +209,12 @@ VROARSessionARCore::~VROARSessionARCore() {
 
 void VROARSessionARCore::run() {
   if (_session != nullptr) {
+    // ARCore requires setCameraTextureName to be called after every pause/resume cycle.
+    // Re-register here so the camera stream is always wired to our OES texture before
+    // ArSession_resume() opens the camera hardware.
+    if (_cameraTextureId != 0) {
+      _session->setCameraTextureName(_cameraTextureId);
+    }
     _session->resume();
     pinfo("AR session resumed");
   } else {
@@ -216,8 +278,58 @@ bool VROARSessionARCore::setAnchorDetection(
   return updateARCoreConfig();
 }
 
+void VROARSessionARCore::setReactVisionConfig(const std::string &apiKey,
+                                              const std::string &projectId) {
+  _rvApiKey    = apiKey;
+  _rvProjectId = projectId;
+  // Credentials supplied — activate the ReactVision cloud anchor provider.
+  setCloudAnchorProvider(VROCloudAnchorProvider::ReactVision);
+#if RVCCA_AVAILABLE
+  // Also initialize the geospatial metadata provider so rvFindNearbyGeospatialAnchors,
+  // rvGetGeospatialAnchor, etc. work whenever provider="reactvision" is set.
+  // This must NOT enable ARCore geospatial mode (VPS) — that belongs to provider="arcore".
+  if (!_geospatialProviderRV && !_rvApiKey.empty() && !_rvProjectId.empty()) {
+    ReactVisionCCA::RVCCAGeospatialProvider::Config cfg;
+    cfg.apiKey    = _rvApiKey;
+    cfg.projectId = _rvProjectId;
+    _geospatialProviderRV = std::make_shared<ReactVisionCCA::RVCCAGeospatialProvider>(cfg);
+    pinfo("VROARSessionARCore: ReactVision Geospatial provider initialized");
+  }
+#endif
+}
+
 void VROARSessionARCore::setCloudAnchorProvider(
     VROCloudAnchorProvider provider) {
+
+  if (provider == VROCloudAnchorProvider::ReactVision) {
+    // ReactVision uses its own network backend and bypasses ARCore cloud anchors
+    // entirely (see hostCloudAnchor / resolveCloudAnchor — the _cloudAnchorProviderRV
+    // check short-circuits before _cloudAnchorMode is ever consulted).
+    // Do NOT call updateARCoreConfig() here: there is nothing to reconfigure for
+    // ARCore, and an unnecessary Pause/Configure/Resume resets VIO — causing
+    // "Insufficient visual features" when hostCloudAnchor runs in the same
+    // renderer-task batch.
+    if (!_cloudAnchorProviderRV && !_rvApiKey.empty() && !_rvProjectId.empty()) {
+      _cloudAnchorProviderRV = std::make_shared<VROCloudAnchorProviderReactVision>(
+          shared_from_this(), _rvApiKey, _rvProjectId);
+      // Improvement 1 + 6B: register as frame listener so onFrameDidRender()
+      // drives multi-frame host accumulation and resolve localization.
+      if (_synchronizer) {
+        _synchronizer->addFrameListener(_cloudAnchorProviderRV);
+      }
+    } else if (_rvApiKey.empty()) {
+      pwarn("VROARSessionARCore: setReactVisionConfig() has not been called — "
+            "ReactVision Cloud Anchors unavailable.");
+    }
+    return;
+  }
+
+  // Tear down RV provider when switching to ARCore or None
+  if (_cloudAnchorProviderRV && _synchronizer) {
+    _synchronizer->removeFrameListener(_cloudAnchorProviderRV);
+  }
+  _cloudAnchorProviderRV.reset();
+
   arcore::CloudAnchorMode newMode = (provider == VROCloudAnchorProvider::None)
     ? arcore::CloudAnchorMode::Disabled
     : arcore::CloudAnchorMode::Enabled;
@@ -329,10 +441,36 @@ bool VROARSessionARCore::updateARCoreConfig() {
 
   if (status == arcore::ConfigStatus::Success) {
     _session->resume();
+    // After pause→configure→resume the camera hardware stream is reset.
+    // Re-register the camera texture name so ARCore reconnects its internal
+    // camera→OES-texture pipeline before the first update().  Without this,
+    // the Mali GPU driver fails to allocate the EGL image that backs the
+    // external OES texture (BAD ALLOC from gles_texture_egl_image_get_2d_template),
+    // which causes the camera feed to freeze after scene navigation.
+    if (_cameraTextureId != 0) {
+      _session->setCameraTextureName(_cameraTextureId);
+    }
+    // After pause→configure→resume, ArFrame's internal state is stale.
+    // Any ArFrame_acquire* call on _frame before the next update() may
+    // access freed ARCore-internal memory (SEGV_MAPERR).  Drive one update
+    // now so _frame is valid for any code that runs before the GL render loop
+    // gets a chance to call updateFrame() again (e.g. hostCloudAnchor queued
+    // in the same renderer-task batch as setReactVisionConfig).
+    if (_frame) {
+      _session->update(_frame);
+    }
     return true;
   } else {
     pwarn("Failed to configure AR session (status %d)", (int)status);
     _session->resume();
+    // Re-register camera texture on failed configure as well — the session
+    // was still paused/resumed and the camera stream was reset.
+    if (_cameraTextureId != 0) {
+      _session->setCameraTextureName(_cameraTextureId);
+    }
+    if (_frame) {
+      _session->update(_frame);
+    }
     return false;
   }
 }
@@ -671,6 +809,13 @@ void VROARSessionARCore::hostCloudAnchor(
     int ttlDays,
     std::function<void(std::shared_ptr<VROARAnchor>)> onSuccess,
     std::function<void(std::string error)> onFailure) {
+
+  // ReactVision path — bypasses ARCore cloud anchors entirely
+  if (_cloudAnchorProviderRV) {
+    _cloudAnchorProviderRV->hostCloudAnchor(anchor, ttlDays, onSuccess, onFailure);
+    return;
+  }
+
   if (_cloudAnchorMode == arcore::CloudAnchorMode::Disabled) {
     pwarn("Cloud anchors are disabled, ignoring anchor host request");
     return;
@@ -682,6 +827,13 @@ void VROARSessionARCore::resolveCloudAnchor(
     std::string cloudAnchorId,
     std::function<void(std::shared_ptr<VROARAnchor> anchor)> onSuccess,
     std::function<void(std::string error)> onFailure) {
+
+  // ReactVision path — bypasses ARCore cloud anchors entirely
+  if (_cloudAnchorProviderRV) {
+    _cloudAnchorProviderRV->resolveCloudAnchor(cloudAnchorId, onSuccess, onFailure);
+    return;
+  }
+
   if (_cloudAnchorMode == arcore::CloudAnchorMode::Disabled) {
     pwarn("Cloud anchors are disabled, ignoring anchor resolve request");
     return;
@@ -704,6 +856,9 @@ std::unique_ptr<VROARFrame> &VROARSessionARCore::updateFrame() {
   arFrame->setDriver(_driver.lock());
   processUpdatedAnchors(arFrame);
   updateDepthTexture();
+  if (isSemanticModeEnabled()) {
+      updateSemanticTexture();
+  }
 
   return _currentFrame;
 }
@@ -971,18 +1126,18 @@ void VROARSessionARCore::processUpdatedAnchors(VROARFrameARCore *frameAR) {
       if (imageIsTracked) {
         auto it = _nativeAnchorMap.find(key);
 
-        // Old image tracking target: update it
+        // Old image tracking target: update tracking method and imageAnchor pose.
+        // Position sync for the scene node is handled by the per-frame sync loop below,
+        // which ensures updates happen every frame regardless of getUpdatedTrackables.
         if (it != _nativeAnchorMap.end()) {
           std::shared_ptr<VROARAnchorARCore> vAnchor = it->second;
           std::shared_ptr<VROARImageAnchor> imageAnchor =
               std::dynamic_pointer_cast<VROARImageAnchor>(
                   vAnchor->getTrackable());
 
-          if (vAnchor) {
+          if (imageAnchor) {
             imageAnchor->setTrackingMethod(trackingMethod);
             syncImageAnchorWithARCore(imageAnchor, image);
-            vAnchor->sync();
-            updateAnchor(vAnchor);
           } else {
             pwarn("Anchor processing error: expected to find an image anchor");
           }
@@ -1047,6 +1202,27 @@ void VROARSessionARCore::processUpdatedAnchors(VROARFrameARCore *frameAR) {
       }
     }
     delete (imageList);
+
+    // Per-frame position sync for all active image anchors.
+    //
+    // ARCore updates the ArAnchor pose on every ArSession_update() for anchors attached to
+    // trackables — regardless of whether the image appears in getUpdatedTrackables() that
+    // frame. By syncing here we guarantee the scene node is always at the current world-space
+    // pose of the image, not just on frames where ARCore happens to report the trackable as
+    // "updated".
+    for (auto& entry : _nativeAnchorMap) {
+      std::shared_ptr<VROARAnchorARCore> vAnchor = entry.second;
+      if (!vAnchor || !vAnchor->isManaged() || !vAnchor->getARNode()) {
+        continue;
+      }
+      std::shared_ptr<VROARImageAnchor> imageAnchor =
+          std::dynamic_pointer_cast<VROARImageAnchor>(vAnchor->getTrackable());
+      if (!imageAnchor) {
+        continue;
+      }
+      vAnchor->sync();
+      updateAnchor(vAnchor);
+    }
   }
 
   delete (anchorList);
@@ -1243,7 +1419,8 @@ void VROARSessionARCore::setOcclusionMode(VROOcclusionMode mode) {
   switch (mode) {
     case VROOcclusionMode::DepthBased:
     case VROOcclusionMode::PeopleOnly:
-      // Enable automatic depth for occlusion
+    case VROOcclusionMode::DepthOnly:
+      // Enable automatic depth for occlusion or depth-only mode
       newDepthMode = arcore::DepthMode::Automatic;
       break;
     case VROOcclusionMode::Disabled:
@@ -1255,9 +1432,16 @@ void VROARSessionARCore::setOcclusionMode(VROOcclusionMode mode) {
 
   if (newDepthMode != _depthMode) {
     _depthMode = newDepthMode;
-    updateARCoreConfig();
-    pinfo("VROARSessionARCore: Occlusion mode set to %d, depth mode set to %d",
-          (int)mode, (int)_depthMode);
+
+    // Only update config if session is ready
+    if (_session != nullptr) {
+      updateARCoreConfig();
+      pinfo("VROARSessionARCore: Occlusion mode set to %d, depth mode set to %d",
+            (int)mode, (int)_depthMode);
+    } else {
+      pinfo("VROARSessionARCore: Occlusion mode will be applied when session is ready (mode=%d, depth=%d)",
+            (int)mode, (int)_depthMode);
+    }
   }
 }
 
@@ -1278,6 +1462,7 @@ bool VROARSessionARCore::isOcclusionModeSupported(VROOcclusionMode mode) const {
     case VROOcclusionMode::Disabled:
       return true;
     case VROOcclusionMode::DepthBased:
+    case VROOcclusionMode::DepthOnly:
       return _session->isDepthModeSupported(arcore::DepthMode::Automatic);
     case VROOcclusionMode::PeopleOnly:
       // People-only occlusion requires both depth and semantic segmentation
@@ -1310,9 +1495,35 @@ void VROARSessionARCore::setGeospatialModeEnabled(bool enabled) {
     updateARCoreConfig();
 }
 
+void VROARSessionARCore::setGeospatialAnchorProvider(VROGeospatialAnchorProvider provider) {
+    VROARSession::setGeospatialAnchorProvider(provider);
+
+    if (provider == VROGeospatialAnchorProvider::ReactVision) {
+        // ReactVision has no ARCore dependency — no VPS, no ARCore session config.
+        // GPS→AR placement uses createLocalGPSAnchor; backend persistence via createAnchor.
+        // _geospatialProviderRV is initialized in setReactVisionConfig().
+        if (!_geospatialProviderRV) {
+            pwarn("VROARSessionARCore: ReactVision geospatial not ready — "
+                  "setReactVisionConfig() must be called first.");
+        }
+        return;
+    } else {
+        // Switching away from ReactVision — tear down the provider
+#if RVCCA_AVAILABLE
+        _geospatialProviderRV.reset();
+#endif
+    }
+}
+
 VROEarthTrackingState VROARSessionARCore::getEarthTrackingState() const {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        return _geospatialProviderRV ? VROEarthTrackingState::Tracking
+                                     : VROEarthTrackingState::Stopped;
+    }
+#endif
     if (!_session) return VROEarthTrackingState::Stopped;
-    
+
     arcore::TrackingState state = _session->getEarthTrackingState();
     switch (state) {
         case arcore::TrackingState::Tracking:
@@ -1326,26 +1537,69 @@ VROEarthTrackingState VROARSessionARCore::getEarthTrackingState() const {
 }
 
 VROGeospatialPose VROARSessionARCore::getCameraGeospatialPose() const {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        return _lastKnownGPSPose;
+    }
+#endif
     VROGeospatialPose result;
     if (!_session) return result;
-    
+
     arcore::GeospatialPoseData poseData;
     if (_session->getCameraGeospatialPose(&poseData)) {
-        result.latitude = poseData.latitude;
-        result.longitude = poseData.longitude;
-        result.altitude = poseData.altitude;
-        result.heading = poseData.heading;
-        result.horizontalAccuracy = poseData.horizontalAccuracy;
-        result.verticalAccuracy = poseData.verticalAccuracy;
+        result.latitude              = poseData.latitude;
+        result.longitude             = poseData.longitude;
+        result.altitude              = poseData.altitude;
+        result.heading               = poseData.heading;
+        result.horizontalAccuracy    = poseData.horizontalAccuracy;
+        result.verticalAccuracy      = poseData.verticalAccuracy;
         result.orientationYawAccuracy = poseData.orientationYawAccuracy;
-        result.quaternion = VROQuaternion(poseData.quaternion[0], poseData.quaternion[1], poseData.quaternion[2], poseData.quaternion[3]);
+        result.quaternion            = VROQuaternion(poseData.quaternion[0],
+                                                     poseData.quaternion[1],
+                                                     poseData.quaternion[2],
+                                                     poseData.quaternion[3]);
     }
-    
     return result;
+}
+
+void VROARSessionARCore::setLastKnownLocation(double lat, double lng, double alt,
+                                              double horizAcc, double vertAcc,
+                                              double heading, double headingAcc) {
+    _lastKnownGPSPose.latitude           = lat;
+    _lastKnownGPSPose.longitude          = lng;
+    _lastKnownGPSPose.altitude           = alt;
+    _lastKnownGPSPose.horizontalAccuracy = horizAcc;
+    _lastKnownGPSPose.verticalAccuracy   = vertAcc;
+    _lastKnownGPSPose.heading            = heading;
+    _lastKnownGPSPose.headingAccuracy    = headingAcc;
+    // Build yaw quaternion in EUS frame (rotation around Y by heading radians)
+    double yaw = heading * M_PI / 180.0;
+    _lastKnownGPSPose.quaternion = VROQuaternion(0.0f,
+                                                 (float)std::sin(yaw / 2.0),
+                                                 0.0f,
+                                                 (float)std::cos(yaw / 2.0));
+}
+
+// Improvement 3: read back the last GPS fix stored by setLastKnownLocation().
+// Called from VROCloudAnchorProviderReactVision::hostCloudAnchor() to populate
+// host request metadata with real coordinates.
+void VROARSessionARCore::getLastKnownLocation(double& lat, double& lng, double& alt) const {
+    lat = _lastKnownGPSPose.latitude;
+    lng = _lastKnownGPSPose.longitude;
+    alt = _lastKnownGPSPose.altitude;
 }
 
 void VROARSessionARCore::checkVPSAvailability(double latitude, double longitude,
                                               std::function<void(VROVPSAvailability)> callback) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        // ReactVision doesn't have a VPS concept; report Available when provider is ready
+        if (callback) callback(_geospatialProviderRV
+                               ? VROVPSAvailability::Available
+                               : VROVPSAvailability::Unknown);
+        return;
+    }
+#endif
     if (!_session) {
         if (callback) callback(VROVPSAvailability::Unknown);
         return;
@@ -1376,10 +1630,73 @@ void VROARSessionARCore::checkVPSAvailability(double latitude, double longitude,
     });
 }
 
+// Create a local ARCore anchor at the GPS-computed world position using
+// acquireNewAnchor. No VPS required — placed by GPS + compass + VIO.
+// AR placement math is delegated to RVCCAGeospatialProvider::computeArPosition()
+// (proprietary algorithm inside libreactvisioncca — not exposed in open-source virocore).
+static std::shared_ptr<VROGeospatialAnchor> createLocalGPSAnchor(
+    arcore::Session *session,
+    const VROGeospatialPose &devicePose,
+    double anchorLat, double anchorLng, double anchorAlt,
+    VROGeospatialAnchorType type, VROQuaternion quaternion,
+    std::shared_ptr<VROARSessionARCore> arSession,
+    ReactVisionCCA::RVCCAGeospatialProvider *provider,
+    std::string &outError,
+    const std::string &knownId = "") {
+    if (devicePose.latitude == 0.0 && devicePose.longitude == 0.0) {
+        outError = "GPS position not available yet. Ensure location permissions are granted.";
+        return nullptr;
+    }
+    auto pos = provider->computeArPosition(
+        devicePose.latitude, devicePose.longitude, devicePose.altitude, devicePose.heading,
+        anchorLat, anchorLng, anchorAlt);
+    float arX = pos[0], arY = pos[1], arZ = pos[2];
+
+    arcore::Pose *pose = session->createPose(arX, arY, arZ,
+                                             quaternion.X, quaternion.Y, quaternion.Z, quaternion.W);
+    arcore::Anchor *nativeAnchor = session->acquireNewAnchor(pose);
+    delete pose;
+
+    if (!nativeAnchor) {
+        outError = "Failed to create local anchor at GPS position.";
+        return nullptr;
+    }
+    std::shared_ptr<arcore::Anchor> anchorShared(nativeAnchor);
+    std::string key = VROStringUtil::toString64(anchorShared->getId());
+    std::string uuid = knownId.empty() ? generateUUID() : knownId;
+
+    auto geoAnchor = std::make_shared<VROGeospatialAnchor>(type, anchorLat, anchorLng, anchorAlt, quaternion);
+    geoAnchor->setId(uuid);
+    geoAnchor->setResolveState(VROGeospatialAnchorResolveState::Success);
+
+    // Set the AR-space transform immediately so the onSuccess callback gets the correct position.
+    // (processUpdatedAnchors will keep it in sync each frame via updateFromGeospatialTransform.)
+    float mtx[16];
+    nativeAnchor->getTransform(mtx);
+    geoAnchor->setTransform(VROMatrix4f(mtx));
+
+    auto vAnchor = std::make_shared<VROARAnchorARCore>(uuid, anchorShared, geoAnchor, arSession);
+    arSession->addAnchor(vAnchor);
+    return geoAnchor;
+}
+
 void VROARSessionARCore::createGeospatialAnchor(double latitude, double longitude, double altitude,
                                                 VROQuaternion quaternion,
                                                 std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
                                                 std::function<void(std::string error)> onFailure) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        std::string error;
+        auto anchor = createLocalGPSAnchor(_session, _lastKnownGPSPose,
+                                           latitude, longitude, altitude,
+                                           VROGeospatialAnchorType::WGS84, quaternion,
+                                           shared_from_this(), _geospatialProviderRV.get(),
+                                           error);
+        if (anchor) { if (onSuccess) onSuccess(anchor); }
+        else         { if (onFailure) onFailure(error);  }
+        return;
+    }
+#endif
     if (_geospatialMode == arcore::GeospatialMode::Disabled) {
         if (onFailure) onFailure("Geospatial mode is disabled");
         return;
@@ -1414,17 +1731,99 @@ void VROARSessionARCore::createGeospatialAnchor(double latitude, double longitud
     }
 }
 
+void VROARSessionARCore::resolveGeospatialAnchor(const std::string& platformUuid,
+                                                  VROQuaternion quaternion,
+                                                  std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
+                                                  std::function<void(std::string error)> onFailure) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        if (!_geospatialProviderRV) {
+            if (onFailure) onFailure("ReactVision geospatial provider not initialized");
+            return;
+        }
+        if (_lastKnownGPSPose.latitude == 0.0 && _lastKnownGPSPose.longitude == 0.0) {
+            if (onFailure) onFailure("GPS position not available yet. Ensure location permissions are granted.");
+            return;
+        }
+        VROGeospatialPose devicePose = _lastKnownGPSPose;
+        std::weak_ptr<VROARSessionARCore> weakSelf = shared_from_this();
+        _geospatialProviderRV->getAnchor(platformUuid,
+            [weakSelf, devicePose, platformUuid, quaternion, onSuccess, onFailure]
+            (ReactVisionCCA::ApiResult<ReactVisionCCA::GeospatialAnchorRecord> r) {
+                VROPlatformDispatchAsyncRenderer([weakSelf, r, devicePose, platformUuid, quaternion, onSuccess, onFailure] {
+                    auto self = weakSelf.lock();
+                    if (!self) return;
+                    if (!r.success) {
+                        if (onFailure) onFailure(r.error.message);
+                        return;
+                    }
+                    std::string error;
+                    auto anchor = createLocalGPSAnchor(self->_session, devicePose,
+                                                       r.data.lat, r.data.lng, r.data.alt,
+                                                       VROGeospatialAnchorType::WGS84, quaternion,
+                                                       self, self->_geospatialProviderRV.get(),
+                                                       error, platformUuid);
+                    if (anchor) { if (onSuccess) onSuccess(anchor); }
+                    else        { if (onFailure) onFailure(error);  }
+                });
+            });
+        return;
+    }
+#endif
+    if (onFailure) onFailure("resolveGeospatialAnchor requires ReactVision geospatial provider");
+}
+
+void VROARSessionARCore::hostGeospatialAnchor(double latitude, double longitude, double altitude,
+                                              const std::string& altitudeMode,
+                                              std::function<void(std::string)> onSuccess,
+                                              std::function<void(std::string)> onFailure) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        if (!_geospatialProviderRV) {
+            if (onFailure) onFailure("ReactVision geospatial provider not initialized");
+            return;
+        }
+        ReactVisionCCA::GeospatialCreateRequest req;
+        req.lat = latitude;
+        req.lng = longitude;
+        req.alt = altitude;
+        req.altitudeMode = altitudeMode.empty() ? "street_level" : altitudeMode;
+        _geospatialProviderRV->createAnchor(req,
+            [onSuccess, onFailure](ReactVisionCCA::ApiResult<ReactVisionCCA::GeospatialAnchorRecord> r) {
+                if (r.success) { if (onSuccess) onSuccess(r.data.id); }
+                else           { if (onFailure) onFailure(r.error.message); }
+            });
+        return;
+    }
+#endif
+    if (onFailure) onFailure("hostGeospatialAnchor requires ReactVision geospatial provider");
+}
+
 void VROARSessionARCore::createTerrainAnchor(double latitude, double longitude, double altitudeAboveTerrain,
                                              VROQuaternion quaternion,
                                              std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
                                              std::function<void(std::string error)> onFailure) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        // Terrain alt = device altitude + offset above terrain (approximation)
+        double absoluteAlt = _lastKnownGPSPose.altitude + altitudeAboveTerrain;
+        std::string error;
+        auto anchor = createLocalGPSAnchor(_session, _lastKnownGPSPose,
+                                           latitude, longitude, absoluteAlt,
+                                           VROGeospatialAnchorType::Terrain, quaternion,
+                                           shared_from_this(), _geospatialProviderRV.get(), error);
+        if (anchor) { if (onSuccess) onSuccess(anchor); }
+        else         { if (onFailure) onFailure(error);  }
+        return;
+    }
+#endif
     if (_geospatialMode == arcore::GeospatialMode::Disabled) {
         if (onFailure) onFailure("Geospatial mode is disabled");
         return;
     }
 
     std::weak_ptr<VROARSessionARCore> weakSession = shared_from_this();
-    
+
     _session->createTerrainAnchor(latitude, longitude, altitudeAboveTerrain, quaternion.X, quaternion.Y, quaternion.Z, quaternion.W,
         [weakSession, latitude, longitude, altitudeAboveTerrain, quaternion, onSuccess](arcore::Anchor *nativeAnchor) {
             VROPlatformDispatchAsyncRenderer([weakSession, latitude, longitude, altitudeAboveTerrain, quaternion, onSuccess, nativeAnchor] {
@@ -1466,13 +1865,27 @@ void VROARSessionARCore::createRooftopAnchor(double latitude, double longitude, 
                                              VROQuaternion quaternion,
                                              std::function<void(std::shared_ptr<VROGeospatialAnchor>)> onSuccess,
                                              std::function<void(std::string error)> onFailure) {
+#if RVCCA_AVAILABLE
+    if (getGeospatialAnchorProvider() == VROGeospatialAnchorProvider::ReactVision) {
+        // Rooftop alt = device altitude + offset above rooftop (approximation)
+        double absoluteAlt = _lastKnownGPSPose.altitude + altitudeAboveRooftop;
+        std::string error;
+        auto anchor = createLocalGPSAnchor(_session, _lastKnownGPSPose,
+                                           latitude, longitude, absoluteAlt,
+                                           VROGeospatialAnchorType::Rooftop, quaternion,
+                                           shared_from_this(), _geospatialProviderRV.get(), error);
+        if (anchor) { if (onSuccess) onSuccess(anchor); }
+        else         { if (onFailure) onFailure(error);  }
+        return;
+    }
+#endif
     if (_geospatialMode == arcore::GeospatialMode::Disabled) {
         if (onFailure) onFailure("Geospatial mode is disabled");
         return;
     }
 
     std::weak_ptr<VROARSessionARCore> weakSession = shared_from_this();
-    
+
     _session->createRooftopAnchor(latitude, longitude, altitudeAboveRooftop, quaternion.X, quaternion.Y, quaternion.Z, quaternion.W,
         [weakSession, latitude, longitude, altitudeAboveRooftop, quaternion, onSuccess](arcore::Anchor *nativeAnchor) {
             VROPlatformDispatchAsyncRenderer([weakSession, latitude, longitude, altitudeAboveRooftop, quaternion, onSuccess, nativeAnchor] {
@@ -1513,21 +1926,605 @@ void VROARSessionARCore::createRooftopAnchor(double latitude, double longitude, 
 void VROARSessionARCore::removeGeospatialAnchor(std::shared_ptr<VROGeospatialAnchor> anchor) {
     if (!anchor) return;
 
+    // Note: do NOT call _geospatialProviderRV->deleteAnchor() here.
+    // removeGeospatialAnchor only removes the anchor from the local AR session.
+    // Use rvDeleteGeospatialAnchor() to explicitly delete from the backend.
+
+    // Search by ID because the caller may pass a dummy anchor (from nativeRemoveGeospatialAnchor)
+    // that shares only the ID with the stored trackable, not the same pointer.
     std::shared_ptr<VROARAnchorARCore> foundAnchor = nullptr;
+    const std::string &targetId = anchor->getId();
     for (std::shared_ptr<VROARAnchorARCore> vAnchor : _anchors) {
-        if (vAnchor->getTrackable() == anchor) {
+        auto trackable = vAnchor->getTrackable();
+        if (trackable && trackable->getId() == targetId) {
             foundAnchor = vAnchor;
             break;
         }
     }
 
     if (foundAnchor) {
-        // We must detach the native anchor first
+        // Detach the native anchor if one exists (ARCore path only)
         if (foundAnchor->getAnchorInternal()) {
             foundAnchor->getAnchorInternal()->detach();
         }
         removeAnchor(foundAnchor);
     }
+}
+
+#if RVCCA_AVAILABLE
+static std::string rvEscJsonARC(const std::string &s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else out += c;
+    }
+    return out;
+}
+
+static std::string rvGeoAnchorToJsonARC(const ReactVisionCCA::GeospatialAnchorRecord &r) {
+    char buf[128];
+    std::string j = "{";
+    j += "\"id\":\"" + rvEscJsonARC(r.id) + "\",";
+    snprintf(buf, sizeof(buf), "%.10f", r.lat); j += "\"lat\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.10f", r.lng); j += "\"lng\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.4f", r.alt);  j += "\"alt\":"; j += buf; j += ",";
+    j += "\"altitudeMode\":\"" + rvEscJsonARC(r.altitudeMode) + "\",";
+    j += "\"name\":\"" + rvEscJsonARC(r.name) + "\",";
+    j += "\"description\":\"" + rvEscJsonARC(r.description) + "\",";
+    j += "\"createdAt\":\"" + rvEscJsonARC(r.createdAt) + "\",";
+    j += "\"updatedAt\":\"" + rvEscJsonARC(r.updatedAt) + "\",";
+    j += "\"sceneAssetId\":\"" + rvEscJsonARC(r.sceneAssetId) + "\",";
+    j += "\"sceneId\":\"" + rvEscJsonARC(r.sceneId) + "\",";
+    j += "\"userAssetId\":\"" + rvEscJsonARC(r.userAssetId) + "\",";
+    snprintf(buf, sizeof(buf), "%.2f", r.distanceMeters); j += "\"distanceMeters\":"; j += buf;
+    // creatorData
+    j += ",\"creatorData\":{";
+    j += "\"id\":\"" + rvEscJsonARC(r.creatorData.id) + "\",";
+    j += "\"firstName\":\"" + rvEscJsonARC(r.creatorData.firstName) + "\",";
+    j += "\"lastName\":\"" + rvEscJsonARC(r.creatorData.lastName) + "\"";
+    j += "}";
+    // sceneAssetData
+    if (r.hasSceneAsset) {
+        j += ",\"sceneAssetData\":{";
+        j += "\"id\":\"" + rvEscJsonARC(r.sceneAssetData.id) + "\",";
+        j += "\"name\":\"" + rvEscJsonARC(r.sceneAssetData.name) + "\",";
+        j += "\"assetId\":\"" + rvEscJsonARC(r.sceneAssetData.assetId) + "\",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.scale); j += "\"scale\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.positionX); j += "\"positionX\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.positionY); j += "\"positionY\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.positionZ); j += "\"positionZ\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.rotationX); j += "\"rotationX\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.rotationY); j += "\"rotationY\":"; j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.4f", r.sceneAssetData.rotationZ); j += "\"rotationZ\":"; j += buf;
+        j += ",\"teamAsset\":{";
+        j += "\"id\":\"" + rvEscJsonARC(r.sceneAssetData.teamAsset.id) + "\",";
+        j += "\"name\":\"" + rvEscJsonARC(r.sceneAssetData.teamAsset.name) + "\",";
+        j += "\"fileUrl\":\"" + rvEscJsonARC(r.sceneAssetData.teamAsset.fileUrl) + "\",";
+        snprintf(buf, sizeof(buf), "%lld", (long long)r.sceneAssetData.teamAsset.fileSize); j += "\"fileSize\":"; j += buf; j += ",";
+        j += "\"assetType\":\"" + rvEscJsonARC(r.sceneAssetData.teamAsset.assetType) + "\"";
+        j += "}";
+        j += "}";
+    }
+    // sceneData
+    if (r.hasScene) {
+        j += ",\"sceneData\":{";
+        j += "\"id\":\"" + rvEscJsonARC(r.sceneData.id) + "\",";
+        j += "\"name\":\"" + rvEscJsonARC(r.sceneData.name) + "\",";
+        snprintf(buf, sizeof(buf), "%.10f", r.sceneData.latitude);  j += "\"latitude\":";  j += buf; j += ",";
+        snprintf(buf, sizeof(buf), "%.10f", r.sceneData.longitude); j += "\"longitude\":"; j += buf; j += ",";
+        j += "\"planeDetection\":\"" + rvEscJsonARC(r.sceneData.planeDetection) + "\",";
+        j += "\"planeDirection\":\"" + rvEscJsonARC(r.sceneData.planeDirection) + "\",";
+        j += "\"createdAt\":\"" + rvEscJsonARC(r.sceneData.createdAt) + "\",";
+        j += "\"sceneAssets\":[";
+        for (size_t i = 0; i < r.sceneData.sceneAssets.size(); ++i) {
+            const auto& sa = r.sceneData.sceneAssets[i];
+            if (i > 0) j += ",";
+            j += "{";
+            j += "\"id\":\"" + rvEscJsonARC(sa.id) + "\",";
+            j += "\"name\":\"" + rvEscJsonARC(sa.name) + "\",";
+            j += "\"assetId\":\"" + rvEscJsonARC(sa.assetId) + "\",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.scale); j += "\"scale\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.positionX); j += "\"positionX\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.positionY); j += "\"positionY\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.positionZ); j += "\"positionZ\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.rotationX); j += "\"rotationX\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.rotationY); j += "\"rotationY\":"; j += buf; j += ",";
+            snprintf(buf, sizeof(buf), "%.4f", sa.rotationZ); j += "\"rotationZ\":"; j += buf;
+            j += ",\"teamAsset\":{";
+            j += "\"id\":\"" + rvEscJsonARC(sa.teamAsset.id) + "\",";
+            j += "\"name\":\"" + rvEscJsonARC(sa.teamAsset.name) + "\",";
+            j += "\"fileUrl\":\"" + rvEscJsonARC(sa.teamAsset.fileUrl) + "\",";
+            snprintf(buf, sizeof(buf), "%lld", (long long)sa.teamAsset.fileSize); j += "\"fileSize\":"; j += buf; j += ",";
+            j += "\"assetType\":\"" + rvEscJsonARC(sa.teamAsset.assetType) + "\"";
+            j += "}";
+            j += "}";
+        }
+        j += "]";
+        j += "}";
+    }
+    // userAssetData
+    if (r.hasUserAsset) {
+        j += ",\"userAssetData\":{";
+        j += "\"id\":\"" + rvEscJsonARC(r.userAssetData.id) + "\",";
+        j += "\"name\":\"" + rvEscJsonARC(r.userAssetData.name) + "\",";
+        j += "\"description\":\"" + rvEscJsonARC(r.userAssetData.description) + "\",";
+        j += "\"fileUrl\":\"" + rvEscJsonARC(r.userAssetData.fileUrl) + "\",";
+        snprintf(buf, sizeof(buf), "%lld", (long long)r.userAssetData.fileSize); j += "\"fileSize\":"; j += buf; j += ",";
+        j += "\"assetType\":\"" + rvEscJsonARC(r.userAssetData.assetType) + "\",";
+        j += "\"externalUserId\":\"" + rvEscJsonARC(r.userAssetData.externalUserId) + "\",";
+        j += "\"moderationStatus\":\"" + rvEscJsonARC(r.userAssetData.moderationStatus) + "\",";
+        j += "\"createdAt\":\"" + rvEscJsonARC(r.userAssetData.createdAt) + "\"";
+        j += "}";
+    }
+    j += "}";
+    return j;
+}
+#endif // RVCCA_AVAILABLE
+
+void VROARSessionARCore::rvGetGeospatialAnchor(
+    const std::string& anchorId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        _geospatialProviderRV->getAnchor(anchorId,
+            [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::GeospatialAnchorRecord> r) {
+            if (callback) {
+                if (r.success) callback(true, rvGeoAnchorToJsonARC(r.data), "");
+                else            callback(false, "", r.error.message);
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision geospatial provider not available");
+}
+
+void VROARSessionARCore::rvFindNearbyGeospatialAnchors(
+    double lat, double lng, double radius, int limit,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        _geospatialProviderRV->findNearby(lat, lng, radius, limit,
+            [callback](ReactVisionCCA::ApiResult<std::vector<ReactVisionCCA::GeospatialAnchorRecord>> r) {
+            if (callback) {
+                if (r.success) {
+                    std::string json = "[";
+                    for (size_t i = 0; i < r.data.size(); ++i) {
+                        if (i > 0) json += ",";
+                        json += rvGeoAnchorToJsonARC(r.data[i]);
+                    }
+                    json += "]";
+                    callback(true, json, "");
+                } else {
+                    callback(false, "", r.error.message);
+                }
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision geospatial provider not available");
+}
+
+void VROARSessionARCore::rvUpdateGeospatialAnchor(
+    const std::string& anchorId,
+    const std::string& sceneAssetId,
+    const std::string& sceneId,
+    const std::string& name,
+    const std::string& userAssetId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        ReactVisionCCA::GeospatialUpdateRequest req;
+        if (!sceneAssetId.empty()) req.sceneAssetId = sceneAssetId;
+        if (!sceneId.empty())      req.sceneId      = sceneId;
+        if (!name.empty())         req.name         = name;
+        if (!userAssetId.empty())  req.userAssetId  = userAssetId;
+        _geospatialProviderRV->updateAnchor(anchorId, req,
+            [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::GeospatialAnchorRecord> r) {
+            if (callback) {
+                if (r.success) callback(true, rvGeoAnchorToJsonARC(r.data), "");
+                else            callback(false, "", r.error.message);
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision geospatial provider not available");
+}
+
+void VROARSessionARCore::rvUploadAsset(
+    const std::string& filePath,
+    const std::string& assetType,
+    const std::string& fileName,
+    const std::string& appUserId,
+    std::function<void(bool, std::string, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        // Strip "file://" prefix — std::ifstream needs a plain filesystem path
+        std::string path = filePath;
+        if (path.rfind("file://", 0) == 0) path = path.substr(7);
+        std::ifstream file(path, std::ios::binary);
+        if (!file.is_open()) {
+            if (callback) callback(false, "", "", "Failed to open file: " + path);
+            return;
+        }
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+        file.close();
+        _geospatialProviderRV->uploadAsset(assetType, fileName, bytes, appUserId,
+            [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::AssetUploadResult> r) {
+            if (callback) {
+                if (r.success) callback(true, r.data.id, r.data.url.empty() ? r.data.fileUrl : r.data.url, "");
+                else            callback(false, "", "", r.error.message);
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "", "", "ReactVision geospatial provider not available");
+}
+
+void VROARSessionARCore::rvDeleteGeospatialAnchor(
+    const std::string& anchorId,
+    std::function<void(bool, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        _geospatialProviderRV->deleteAnchor(anchorId,
+            [callback](bool success, ReactVisionCCA::ApiError err) {
+            if (callback) {
+                callback(success, success ? "" : err.message);
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "ReactVision geospatial provider not available");
+}
+
+void VROARSessionARCore::rvListGeospatialAnchors(
+    int limit, int offset,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_geospatialProviderRV) {
+        _geospatialProviderRV->listAnchors(limit, offset,
+            [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::GeospatialListResult> r) {
+            if (callback) {
+                if (r.success) {
+                    std::string json = "[";
+                    const auto& anchors = r.data.anchors;
+                    for (size_t i = 0; i < anchors.size(); ++i) {
+                        if (i > 0) json += ",";
+                        json += rvGeoAnchorToJsonARC(anchors[i]);
+                    }
+                    json += "]";
+                    callback(true, json, "");
+                } else {
+                    callback(false, "", r.error.message);
+                }
+            }
+        });
+        return;
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision geospatial provider not available");
+}
+
+// ── Cloud anchor management ───────────────────────────────────────────────────
+
+#if RVCCA_AVAILABLE
+static std::string rvSceneAssetToJsonARC(const ReactVisionCCA::SceneAPIAsset& a) {
+    char buf[256];
+    std::string j = "{";
+    j += "\"id\":\"" + rvEscJsonARC(a.id) + "\",";
+    j += "\"name\":\"" + rvEscJsonARC(a.name) + "\",";
+    j += "\"description\":\"" + rvEscJsonARC(a.description) + "\",";
+    j += "\"fileUrl\":\"" + rvEscJsonARC(a.fileUrl) + "\",";
+    j += "\"fileSize\":" + std::to_string(a.fileSize) + ",";
+    j += "\"assetTypeName\":\"" + rvEscJsonARC(a.assetTypeName) + "\",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionX); j += "\"positionX\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionY); j += "\"positionY\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionZ); j += "\"positionZ\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationX); j += "\"rotationX\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationY); j += "\"rotationY\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationZ); j += "\"rotationZ\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.scale);     j += "\"scale\":";     j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.10f", a.latitude);  j += "\"latitude\":";  j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.10f", a.longitude); j += "\"longitude\":"; j += buf; j += ",";
+    j += std::string("\"isDraggable\":") + (a.isDraggable ? "true" : "false") + ",";
+    j += "\"triggerImageUrl\":\"" + rvEscJsonARC(a.triggerImageUrl) + "\",";
+    j += "\"triggerImageOrientation\":\"" + rvEscJsonARC(a.triggerImageOrientation) + "\",";
+    snprintf(buf, sizeof(buf), "%.6f", a.triggerImagePhysicalWidthM);
+    j += "\"triggerImagePhysicalWidthM\":"; j += buf; j += ",";
+    j += "\"createdAt\":\"" + rvEscJsonARC(a.createdAt) + "\",";
+    j += "\"updatedAt\":\"" + rvEscJsonARC(a.updatedAt) + "\"";
+    j += "}";
+    return j;
+}
+
+static std::string rvCloudAssetToJsonARC(const ReactVisionCCA::CloudAnchorAsset& a) {
+    char buf[256];
+    std::string j = "{";
+    j += "\"id\":\"" + rvEscJsonARC(a.id) + "\",";
+    j += "\"name\":\"" + rvEscJsonARC(a.name) + "\",";
+    j += "\"fileUrl\":\"" + rvEscJsonARC(a.fileUrl) + "\",";
+    j += "\"assetType\":\"" + rvEscJsonARC(a.assetType) + "\",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionX); j += "\"positionX\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionY); j += "\"positionY\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.positionZ); j += "\"positionZ\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationX); j += "\"rotationX\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationY); j += "\"rotationY\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationZ); j += "\"rotationZ\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.rotationW); j += "\"rotationW\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.6f", a.scale);     j += "\"scale\":";     j += buf; j += ",";
+    j += std::string("\"isVisible\":") + (a.isVisible ? "true" : "false");
+    j += "}";
+    return j;
+}
+
+static std::string rvCloudAnchorToJsonARC(const ReactVisionCCA::CloudAnchorRecord& r) {
+    char buf[128];
+    std::string j = "{";
+    j += "\"id\":\"" + rvEscJsonARC(r.id) + "\",";
+    j += "\"projectId\":\"" + rvEscJsonARC(r.projectId) + "\",";
+    j += "\"name\":\"" + rvEscJsonARC(r.name) + "\",";
+    j += "\"description\":\"" + rvEscJsonARC(r.description) + "\",";
+    snprintf(buf, sizeof(buf), "%.4f", r.cameraFx); j += "\"cameraFx\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.4f", r.cameraFy); j += "\"cameraFy\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.4f", r.cameraCx); j += "\"cameraCx\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.4f", r.cameraCy); j += "\"cameraCy\":"; j += buf; j += ",";
+    j += "\"imageWidth\":" + std::to_string(r.imageWidth) + ",";
+    j += "\"imageHeight\":" + std::to_string(r.imageHeight) + ",";
+    j += "\"descriptorsUrl\":\"" + rvEscJsonARC(r.descriptorsUrl) + "\",";
+    j += "\"descriptorCount\":" + std::to_string(r.descriptorCount) + ",";
+    j += "\"keypointCount\":" + std::to_string(r.keypointCount) + ",";
+    snprintf(buf, sizeof(buf), "%.10f", r.latitude);  j += "\"latitude\":";  j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.10f", r.longitude); j += "\"longitude\":"; j += buf; j += ",";
+    snprintf(buf, sizeof(buf), "%.4f",  r.altitude);  j += "\"altitude\":";  j += buf; j += ",";
+    j += "\"platform\":\"" + rvEscJsonARC(r.platform) + "\",";
+    j += "\"deviceModel\":\"" + rvEscJsonARC(r.deviceModel) + "\",";
+    j += "\"externalUserId\":\"" + rvEscJsonARC(r.externalUserId) + "\",";
+    j += std::string("\"isPublic\":") + (r.isPublic ? "true" : "false") + ",";
+    j += "\"resolveCount\":" + std::to_string(r.resolveCount) + ",";
+    j += "\"successfulResolveCount\":" + std::to_string(r.successfulResolveCount) + ",";
+    snprintf(buf, sizeof(buf), "%.4f", r.averageConfidence); j += "\"averageConfidence\":"; j += buf; j += ",";
+    j += "\"lastResolvedAt\":\"" + rvEscJsonARC(r.lastResolvedAt) + "\",";
+    j += "\"createdAt\":\"" + rvEscJsonARC(r.createdAt) + "\",";
+    j += "\"tags\":[";
+    for (size_t i = 0; i < r.tags.size(); ++i) {
+        if (i > 0) j += ",";
+        j += "\"" + rvEscJsonARC(r.tags[i]) + "\"";
+    }
+    j += "],\"assets\":[";
+    for (size_t i = 0; i < r.assets.size(); ++i) {
+        if (i > 0) j += ",";
+        j += rvCloudAssetToJsonARC(r.assets[i]);
+    }
+    j += "]}";
+    return j;
+}
+#endif // RVCCA_AVAILABLE
+
+void VROARSessionARCore::rvGetCloudAnchor(
+    const std::string& anchorId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->getCloudAnchor(anchorId,
+                [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::CloudAnchorRecord> r) {
+                if (callback) {
+                    if (r.success) callback(true, rvCloudAnchorToJsonARC(r.data), "");
+                    else            callback(false, "", r.error.message);
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvListCloudAnchors(
+    int limit, int offset,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->listCloudAnchors(limit, offset,
+                [callback](ReactVisionCCA::ApiResult<std::vector<ReactVisionCCA::CloudAnchorRecord>> r) {
+                if (callback) {
+                    if (r.success) {
+                        std::string json = "[";
+                        for (size_t i = 0; i < r.data.size(); ++i) {
+                            if (i > 0) json += ",";
+                            json += rvCloudAnchorToJsonARC(r.data[i]);
+                        }
+                        json += "]";
+                        callback(true, json, "");
+                    } else {
+                        callback(false, "", r.error.message);
+                    }
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvUpdateCloudAnchor(
+    const std::string& anchorId,
+    const std::string& name,
+    const std::string& description,
+    bool isPublic,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->updateCloudAnchor(anchorId, name, description, isPublic,
+                [callback](ReactVisionCCA::ApiResult<ReactVisionCCA::CloudAnchorRecord> r) {
+                if (callback) {
+                    if (r.success) callback(true, rvCloudAnchorToJsonARC(r.data), "");
+                    else            callback(false, "", r.error.message);
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvDeleteCloudAnchor(
+    const std::string& anchorId,
+    std::function<void(bool, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->deleteCloudAnchor(anchorId,
+                [callback](bool success, ReactVisionCCA::ApiError err) {
+                if (callback) callback(success, success ? "" : err.message);
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvFindNearbyCloudAnchors(
+    double lat, double lng, double radius, int limit,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->findNearbyCloudAnchors(lat, lng, radius, limit,
+                [callback](ReactVisionCCA::ApiResult<std::vector<ReactVisionCCA::CloudAnchorRecord>> r) {
+                if (callback) {
+                    if (r.success) {
+                        std::string json = "[";
+                        for (size_t i = 0; i < r.data.size(); ++i) {
+                            if (i > 0) json += ",";
+                            json += rvCloudAnchorToJsonARC(r.data[i]);
+                        }
+                        json += "]";
+                        callback(true, json, "");
+                    } else {
+                        callback(false, "", r.error.message);
+                    }
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvAttachAssetToCloudAnchor(
+    const std::string& anchorId,
+    const std::string& fileUrl,
+    int64_t fileSize,
+    const std::string& name,
+    const std::string& assetType,
+    const std::string& externalUserId,
+    std::function<void(bool, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->attachAssetToCloudAnchor(anchorId, fileUrl, fileSize, name, assetType, externalUserId,
+                [callback](bool success, ReactVisionCCA::ApiError err) {
+                if (callback) callback(success, success ? "" : err.message);
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvRemoveAssetFromCloudAnchor(
+    const std::string& anchorId,
+    const std::string& assetId,
+    std::function<void(bool, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->removeAssetFromCloudAnchor(anchorId, assetId,
+                [callback](bool success, ReactVisionCCA::ApiError err) {
+                if (callback) callback(success, success ? "" : err.message);
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvTrackCloudAnchorResolution(
+    const std::string& anchorId,
+    bool success,
+    double confidence,
+    int matchCount,
+    int inlierCount,
+    int processingTimeMs,
+    const std::string& platform,
+    const std::string& externalUserId,
+    std::function<void(bool, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->trackResolution(anchorId, success, confidence, matchCount, inlierCount,
+                processingTimeMs, platform, externalUserId,
+                [callback](bool ok, ReactVisionCCA::ApiError err) {
+                if (callback) callback(ok, ok ? "" : err.message);
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvGetSceneAssets(
+    const std::string& sceneId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->getSceneAssets(sceneId,
+                [callback](ReactVisionCCA::ApiResult<std::vector<ReactVisionCCA::SceneAPIAsset>> r) {
+                if (callback) {
+                    if (r.success) {
+                        std::string json = "[";
+                        for (size_t i = 0; i < r.data.size(); ++i) {
+                            if (i > 0) json += ",";
+                            json += rvSceneAssetToJsonARC(r.data[i]);
+                        }
+                        json += "]";
+                        callback(true, json, "");
+                    } else {
+                        callback(false, "", r.error.message);
+                    }
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
 }
 
 #pragma mark - Scene Semantics API
@@ -1684,4 +2681,116 @@ void VROARSessionARCore::updateDepthTexture() {
     }
 
     delete depthImage;
+}
+
+// Helper: create or update an R8 GPU texture with the given pixel data.
+static void uploadR8Texture(std::shared_ptr<VROTexture> &texture,
+                             const uint8_t *data, int dataLength,
+                             int width, int height,
+                             std::weak_ptr<VRODriver> driverWeak) {
+    if (!texture || texture->getWidth() != width || texture->getHeight() != height) {
+        auto vData = std::make_shared<VROData>((void *)data, dataLength, VRODataOwnership::Copy);
+        std::vector<std::shared_ptr<VROData>> dataVec{ vData };
+        std::vector<uint32_t> mipSizes;
+        texture = std::make_shared<VROTexture>(
+            VROTextureType::Texture2D, VROTextureFormat::R8, VROTextureInternalFormat::R8,
+            false, VROMipmapMode::None,
+            dataVec, width, height, mipSizes);
+        texture->setMinificationFilter(VROFilterMode::Nearest);
+        texture->setMagnificationFilter(VROFilterMode::Nearest);
+        texture->setWrapS(VROWrapMode::Clamp);
+        texture->setWrapT(VROWrapMode::Clamp);
+    } else {
+        std::shared_ptr<VRODriver> driver = driverWeak.lock();
+        if (driver) {
+            VROTextureSubstrate *substrate = texture->getSubstrate(0, driver, true);
+            if (substrate) {
+                VROTextureSubstrateOpenGL *glSubstrate = (VROTextureSubstrateOpenGL *)substrate;
+                std::pair<GLenum, GLuint> texInfo = glSubstrate->getTexture();
+                glBindTexture(texInfo.first, texInfo.second);
+                glTexSubImage2D(texInfo.first, 0, 0, 0, width, height, GL_RED, GL_UNSIGNED_BYTE, data);
+                glBindTexture(texInfo.first, 0);
+            }
+        }
+    }
+}
+
+void VROARSessionARCore::updateSemanticTexture() {
+    if (!_frame) {
+        return;
+    }
+
+    // --- Acquire semantic label image ---
+    arcore::Image *semanticImage = nullptr;
+    if (_frame->acquireSemanticImage(&semanticImage) != arcore::ImageRetrievalStatus::Success
+        || semanticImage == nullptr) {
+        // Not yet available (normal for first few frames) — keep previous texture.
+        return;
+    }
+
+    int width  = semanticImage->getWidth();
+    int height = semanticImage->getHeight();
+    if (width <= 0 || height <= 0) { delete semanticImage; return; }
+
+    const uint8_t *rawLabel = nullptr;
+    int dataLength = 0;
+    semanticImage->getPlaneData(0, &rawLabel, &dataLength);
+    if (!rawLabel || dataLength <= 0) { delete semanticImage; return; }
+
+    // --- Acquire confidence image (always; used for alpha blend + optional threshold) ---
+    arcore::Image *confImage = nullptr;
+    const uint8_t *rawConf  = nullptr;
+    int confLength           = 0;
+    if (_frame->acquireSemanticConfidenceImage(&confImage) == arcore::ImageRetrievalStatus::Success
+        && confImage != nullptr
+        && confImage->getWidth() == width && confImage->getHeight() == height) {
+        confImage->getPlaneData(0, &rawConf, &confLength);
+        if (confLength != dataLength) rawConf = nullptr;
+    }
+
+    // --- Make mutable working copies ---
+    // labelData: temporal-smoothed labels; confData: paired per-pixel confidence.
+    std::vector<uint8_t> labelData(rawLabel, rawLabel + dataLength);
+    std::vector<uint8_t> confData(dataLength, 255); // default full confidence when unavailable
+    if (rawConf) {
+        std::copy(rawConf, rawConf + dataLength, confData.begin());
+    }
+
+    // --- CPU confidence threshold: mask low-confidence pixels to unlabeled ---
+    if (_semanticConfidenceThreshold > 0.0f && rawConf) {
+        uint8_t threshold = (uint8_t)(_semanticConfidenceThreshold * 255.0f);
+        for (int i = 0; i < dataLength; i++) {
+            if (confData[i] < threshold) {
+                labelData[i] = 0; // unlabeled
+            }
+        }
+    }
+
+    // --- Temporal holdout: suppress isolated label→unlabeled flicker ---
+    // When a pixel was labeled on the previous frame but reads unlabeled now,
+    // hold the previous label with a slightly decayed confidence. This eliminates
+    // single-frame drop-outs at segmentation boundaries without adding latency
+    // to genuine label changes (which remain unlabeled across multiple frames).
+    if ((int)_prevSemanticData.size() == dataLength) {
+        for (int i = 0; i < dataLength; i++) {
+            if (labelData[i] == 0 && _prevSemanticData[i] != 0) {
+                labelData[i] = _prevSemanticData[i];
+                // Decay confidence slightly to signal the holdout state.
+                confData[i]  = (uint8_t)(_prevConfidenceData[i] * 0.75f);
+            }
+        }
+    }
+
+    // Save smoothed buffers for the next frame.
+    _prevSemanticData   = labelData;
+    _prevConfidenceData = confData;
+
+    delete semanticImage;
+    if (confImage) { delete confImage; }
+
+    // --- Upload label texture ---
+    uploadR8Texture(_semanticTexture, labelData.data(), dataLength, width, height, _driver);
+
+    // --- Upload confidence texture ---
+    uploadR8Texture(_semanticConfidenceTexture, confData.data(), dataLength, width, height, _driver);
 }

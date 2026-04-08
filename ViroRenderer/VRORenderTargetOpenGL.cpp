@@ -46,6 +46,7 @@ VRORenderTargetOpenGL::VRORenderTargetOpenGL(VRORenderTargetType type, int numAt
     VRORenderTarget(type, numAttachments),
     _framebuffer(0),
     _depthStencilbuffer(0),
+    _stencilbuffer(0),
     _colorbuffer(0),
     _numImages(numImages),
     _mipmapsEnabled(enableMipmaps),
@@ -127,9 +128,10 @@ void VRORenderTargetOpenGL::invalidate() {
             
         case VRORenderTargetType::DepthTexture:
         case VRORenderTargetType::DepthTextureArray:
+        case VRORenderTargetType::DepthTextureRaw:
             // Nothing to discard
             break;
-            
+
         default:
             // Nothing to discard
             break;
@@ -143,6 +145,20 @@ void VRORenderTargetOpenGL::blitColor(std::shared_ptr<VRORenderTarget> destinati
 
 void VRORenderTargetOpenGL::blitStencil(std::shared_ptr<VRORenderTarget> destination, bool flipY, std::shared_ptr<VRODriver> driver) {
     blitAttachment(GL_COLOR_ATTACHMENT0, GL_STENCIL_BUFFER_BIT, GL_NEAREST, destination, flipY, driver);
+}
+
+void VRORenderTargetOpenGL::blitDepth(std::shared_ptr<VRORenderTarget> destination) {
+    passert (_viewport.getWidth() == destination->getWidth());
+    passert (_viewport.getHeight() == destination->getHeight());
+
+    VRORenderTargetOpenGL *t = (VRORenderTargetOpenGL *) destination.get();
+    GL( glBindFramebuffer(GL_READ_FRAMEBUFFER, _framebuffer) );
+    GL( glBindFramebuffer(GL_DRAW_FRAMEBUFFER, t->_framebuffer) );
+    GL( glBlitFramebuffer(_viewport.getX(), _viewport.getY(),
+                          _viewport.getX() + _viewport.getWidth(), _viewport.getY() + _viewport.getHeight(),
+                          t->_viewport.getX(), t->_viewport.getY(),
+                          t->_viewport.getX() + t->_viewport.getWidth(), t->_viewport.getY() + t->_viewport.getHeight(),
+                          GL_DEPTH_BUFFER_BIT, GL_NEAREST) );
 }
 
 void VRORenderTargetOpenGL::blitAttachment(GLenum attachment, GLbitfield mask, GLenum filter,
@@ -356,19 +372,24 @@ bool VRORenderTargetOpenGL::attachNewTextures() {
         }
         
         /*
-         Create a depth or depth/stencil renderbuffer, allocate storage for it, and attach it to
-         the framebuffer's depth attachment point.
+         Use a single packed GL_DEPTH24_STENCIL8 renderbuffer attached to both the depth and
+         stencil attachment points. On iOS/Apple's OpenGL ES driver, separate GL_DEPTH_COMPONENT24
+         + GL_STENCIL_INDEX8 renderbuffers cause stencil writes to be silently ignored even though
+         glCheckFramebufferStatus returns GL_FRAMEBUFFER_COMPLETE. Packed depth+stencil is the
+         Apple-recommended configuration and is required for portal stencil rendering to work.
+
+         _sceneDepthTarget (DepthTextureRaw) also uses GL_DEPTH24_STENCIL8, so the formats match
+         and glBlitFramebuffer(GL_DEPTH_BUFFER_BIT) between these two targets continues to work.
          */
         if (_needsDepthStencil && _depthStencilbuffer == 0) {
             _depthStencilRenderbufferStorage = GL_DEPTH24_STENCIL8;
             GL (glGenRenderbuffers(1, &_depthStencilbuffer) );
             GL (glBindRenderbuffer(GL_RENDERBUFFER, _depthStencilbuffer) );
-            GL (glRenderbufferStorage(GL_RENDERBUFFER, _depthStencilRenderbufferStorage, _viewport.getWidth(), _viewport.getHeight()) );
-            
+            GL (glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, _viewport.getWidth(), _viewport.getHeight()) );
             GL (glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, _depthStencilbuffer) );
             GL (glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, _depthStencilbuffer) );
         }
-        
+
         /*
          Tell the system we're drawing to all attached color buffers.
          */
@@ -512,6 +533,42 @@ bool VRORenderTargetOpenGL::attachNewTextures() {
         _textures[0] = std::make_shared<VROTexture>(VROTextureType::Texture2D, VROTextureInternalFormat::RGBA8,
                                                     std::move(substrate));
     }
+    else if (_type == VRORenderTargetType::DepthTextureRaw) {
+        // Plain depth texture without PCF compare mode — raw depth values sampled via sampler2D.
+        GLenum target = GL_TEXTURE_2D;
+        GL (glBindFramebuffer(GL_FRAMEBUFFER, _framebuffer) );
+
+        GLuint texName;
+        GL (glGenTextures(1, &texName) );
+        GL (glBindTexture(GL_TEXTURE_2D, texName) );
+
+        GL (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST) );
+        GL (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST) );
+        GL (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE) );
+        GL (glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE) );
+        // No GL_TEXTURE_COMPARE_MODE — sample raw depth with texture() in GLSL.
+        // GL_DEPTH24_STENCIL8 matches the packed format used in _hdrTarget so that
+        // glBlitFramebuffer(GL_DEPTH_BUFFER_BIT) between them succeeds on Apple's driver.
+        // GL_DEPTH_STENCIL_TEXTURE_MODE defaults to GL_DEPTH_COMPONENT, so texture() still
+        // returns the depth value when this texture is bound as a sampler2D.
+        GL (glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, _viewport.getWidth(), _viewport.getHeight(), 0,
+                         GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, 0) );
+        GL (glBindTexture(GL_TEXTURE_2D, 0) );
+        GL (glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, texName, 0) );
+
+        GLenum none[] = { GL_NONE };
+        GL (glDrawBuffers(1, none) );
+        GL (glReadBuffer(GL_NONE) );
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            pinfo("Failed to make complete framebuffer object for raw depth texture [error %x]", glCheckFramebufferStatus(GL_FRAMEBUFFER));
+            return false;
+        }
+
+        std::unique_ptr<VROTextureSubstrate> substrate = std::unique_ptr<VROTextureSubstrateOpenGL>(new VROTextureSubstrateOpenGL(target, texName, driver));
+        _textures[0] = std::make_shared<VROTexture>(VROTextureType::Texture2D, VROTextureInternalFormat::RGBA8,
+                                                    std::move(substrate));
+    }
     else if (_type == VRORenderTargetType::DepthTextureArray) {
         GLenum target = GL_TEXTURE_2D_ARRAY;
         GL (glBindFramebuffer(GL_FRAMEBUFFER, _framebuffer) );
@@ -582,6 +639,7 @@ GLenum VRORenderTargetOpenGL::getTextureAttachmentType(int attachment) const {
             return GL_COLOR_ATTACHMENT0 + attachment;
         case VRORenderTargetType::DepthTexture:
         case VRORenderTargetType::DepthTextureArray:
+        case VRORenderTargetType::DepthTextureRaw:
             return GL_DEPTH_ATTACHMENT;
         default:
             return 0;
@@ -607,6 +665,7 @@ bool VRORenderTargetOpenGL::restoreFramebuffers() {
             
         case VRORenderTargetType::DepthTexture:
         case VRORenderTargetType::DepthTextureArray:
+        case VRORenderTargetType::DepthTextureRaw:
             return createDepthTextureTarget();
             
         default:
@@ -634,7 +693,11 @@ void VRORenderTargetOpenGL::deleteFramebuffers() {
         driver->deleteRenderbuffer(_depthStencilbuffer);
         _depthStencilbuffer = 0;
     }
-    
+    if (_stencilbuffer) {
+        driver->deleteRenderbuffer(_stencilbuffer);
+        _stencilbuffer = 0;
+    }
+
     for (std::shared_ptr<VROTexture> &texture : _textures) {
         texture.reset();
     }
