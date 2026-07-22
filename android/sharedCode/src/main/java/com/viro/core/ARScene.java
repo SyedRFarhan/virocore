@@ -92,6 +92,13 @@ public class ARScene extends Scene {
         void onAmbientLightUpdate(float intensity, Vector color);
 
         /**
+         * Invoked once when depth data first becomes available for the session (via the
+         * ARCore Depth API). After this fires, hit tests can return DepthPoints. Optional;
+         * defaults to a no-op so existing listeners are unaffected.
+         */
+        default void onDepthReady() {}
+
+        /**
          * Invoked when a real-world {@link ARAnchor} is detected. You can associate virtual
          * content with this new anchor by adding said content to the associated {@link ARNode}.
          * Note that the {@link ARNode} is automatically added to the Scene, and will be
@@ -813,6 +820,10 @@ public class ARScene extends Scene {
         nativeSetOcclusionMode(mNativeRef, mode.getId());
     }
 
+    public void setFrontCameraEnabled(boolean enabled) {
+        nativeSetFrontCameraEnabled(mNativeRef, enabled);
+    }
+
     /**
      * Check if occlusion is supported on the current device. Occlusion requires device support
      * for depth sensing (e.g., ARCore Depth API support).
@@ -929,7 +940,11 @@ public class ARScene extends Scene {
      * @hide
      */
     public void setReactVisionConfig(String apiKey, String projectId) {
-        nativeSetReactVisionConfig(mNativeRef, apiKey, projectId);
+        setReactVisionConfig(apiKey, projectId, "");
+    }
+
+    public void setReactVisionConfig(String apiKey, String projectId, String endpoint) {
+        nativeSetReactVisionConfig(mNativeRef, apiKey, projectId, endpoint != null ? endpoint : "");
     }
 
     public void setGeospatialAnchorProvider(String provider) {
@@ -1389,6 +1404,18 @@ public class ARScene extends Scene {
         nativeRvRemoveAssetFromCloudAnchor(mNativeRef, key, anchorId, assetId);
     }
 
+    public void rvGetProject(String projectId, RvCloudAnchorCallback callback) {
+        String key = "rvGetProject_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvGetProject(mNativeRef, key, projectId);
+    }
+
+    public void rvGetScene(String sceneId, RvCloudAnchorCallback callback) {
+        String key = "rvGetScene_" + System.nanoTime();
+        mRvCloudCallbacks.put(key, callback);
+        nativeRvGetScene(mNativeRef, key, sceneId);
+    }
+
     public void rvGetSceneAssets(String sceneId, RvCloudAnchorCallback callback) {
         String key = "rvGetSceneAssets_" + System.nanoTime();
         mRvCloudCallbacks.put(key, callback);
@@ -1633,13 +1660,14 @@ public class ARScene extends Scene {
     private native void nativeRemoveARImageTargetDeclarative(long sceneControllerRef, long arImageTargetRef);
     private native void nativeHostCloudAnchor(long sceneControllerRef, String anchorId, int ttlDays);
     private native void nativeResolveCloudAnchor(long sceneControllerRef, String cloudAnchorId);
-    private native void nativeSetReactVisionConfig(long sceneControllerRef, String apiKey, String projectId);
+    private native void nativeSetReactVisionConfig(long sceneControllerRef, String apiKey, String projectId, String endpoint);
     private native void nativeSetGeospatialAnchorProvider(long sceneControllerRef, String provider);
     private native float nativeGetAmbientLightIntensity(long sceneControllerRef);
     private native long nativeCreateAnchoredNode(long sceneControllerRef, float px, float py, float pz,
                                                  float qx, float qy, float qz, float qw);
     private native float[] nativeGetAmbientLightColor(long sceneControllerRef);
     private native void nativeSetOcclusionMode(long sceneControllerRef, int mode);
+    private native void nativeSetFrontCameraEnabled(long sceneControllerRef, boolean enabled);
     private native boolean nativeIsOcclusionSupported(long sceneControllerRef);
     private native boolean nativeIsOcclusionModeSupported(long sceneControllerRef, int mode);
 
@@ -1696,6 +1724,8 @@ public class ARScene extends Scene {
     private native void nativeRvFindNearbyCloudAnchors(long sceneControllerRef, String key,
                                                         double lat, double lng,
                                                         double radius, int limit);
+    private native void nativeRvGetProject(long sceneControllerRef, String key, String projectId);
+    private native void nativeRvGetScene(long sceneControllerRef, String key, String sceneId);
     private native void nativeRvGetSceneAssets(long sceneControllerRef, String key, String sceneId);
     private native void nativeRvAttachAssetToCloudAnchor(long sceneControllerRef, String key,
                                                           String anchorId, String fileUrl,
@@ -1785,6 +1815,14 @@ public class ARScene extends Scene {
         Listener delegate;
         if (mListener != null) {
             mListener.onAmbientLightUpdate(intensity, new Vector(r, g, b));
+        }
+    }
+    /**
+     * @hide
+     */
+    void onDepthReady() {
+        if (mListener != null) {
+            mListener.onDepthReady();
         }
     }
     /**

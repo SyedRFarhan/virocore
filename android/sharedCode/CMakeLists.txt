@@ -16,6 +16,7 @@ include_directories(${VIRO_RENDERER_SRC}
                     ${VIRO_CAPI_SRC}
                     ${VIRO_ANDROID_SRC}
                     ${VIRO_ANDROID_SRC}/jni
+                    ${VIRO_ANDROID_SRC}/include        # OpenXR headers (bundled fallback)
                     ${VIRO_ANDROID_INCLUDES}/gvr/include
                     ${VIRO_ANDROID_INCLUDES}/ovr/include
                     ${VIRO_ANDROID_INCLUDES}/freetype/include
@@ -23,6 +24,14 @@ include_directories(${VIRO_RENDERER_SRC}
                     ${VIRO_ANDROID_INCLUDES}/bullet/include
                     ${VIRO_ANDROID_INCLUDES}/opencv/include
                     ${VIRO_ANDROID_INCLUDES}/arcore/include)
+
+# ── OpenXR loader (via Prefab from openxr_loader_for_android AAR) ─────────────
+# AAR is sourced from Khronos GitHub releases (openxr_sdk/maven local repo).
+# Prefab package name: OpenXR  |  module: openxr_loader
+# Requires buildFeatures { prefab true } in viroreact/build.gradle
+find_package(OpenXR REQUIRED CONFIG)
+set(OPENXR_LINK_LIB OpenXR::openxr_loader)
+message(STATUS "OpenXR loader: FOUND via Prefab (OpenXR::openxr_loader)")
 
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
@@ -45,17 +54,24 @@ add_library( # Sets the name of the library.
              ${VIRO_ANDROID_SRC}/VROLooper.cpp
              ${VIRO_ANDROID_SRC}/VROSceneRenderer.cpp
              ${VIRO_ANDROID_SRC}/VROSceneRendererGVR.cpp
-             ${VIRO_ANDROID_SRC}/VROSceneRendererOVR.cpp
+             # VROSceneRendererOVR.cpp (VrApi / GearVR-Oculus Go) deprecated in 2.57.3 —
+             # superseded by the OpenXR (Quest) path. Excluding it drops the libvrapi.so
+             # dependency, which was not 16 KB-page compliant (see viro#491).
+             ${VIRO_ANDROID_SRC}/VROSceneRendererOpenXR.cpp
+             ${VIRO_ANDROID_SRC}/VROARSessionOpenXR.cpp
              ${VIRO_ANDROID_SRC}/VROSceneRendererSceneView.cpp
              ${VIRO_ANDROID_SRC}/VROSample.cpp
              ${VIRO_ANDROID_SRC}/VROImageAndroid.cpp
              ${VIRO_ANDROID_SRC}/VROAudioPlayerAndroid.cpp
+             ${VIRO_ANDROID_SRC}/VROAudioPlayerStreamAndroid.cpp
              ${VIRO_ANDROID_SRC}/VROAVPlayer.cpp
              ${VIRO_ANDROID_SRC}/VROVideoTextureAVP.cpp
+             ${VIRO_ANDROID_SRC}/VROCameraTextureAndroid.cpp
              ${VIRO_ANDROID_SRC}/VROTypefaceAndroid.cpp
              ${VIRO_ANDROID_SRC}/VROInputControllerDaydream.cpp
              ${VIRO_ANDROID_SRC}/VROInputControllerCardboard.cpp
-             ${VIRO_ANDROID_SRC}/VROInputControllerOVR.cpp
+             # VROInputControllerOVR.cpp deprecated in 2.57.3 (VrApi path removed).
+             ${VIRO_ANDROID_SRC}/VROInputControllerOpenXR.cpp
              ${VIRO_ANDROID_SRC}/VROAVRecorderAndroid.cpp
              ${VIRO_ANDROID_SRC}/VROTextureReader.cpp
              ${VIRO_ANDROID_SRC}/VROAndroidViewTexture.cpp
@@ -76,6 +92,7 @@ add_library( # Sets the name of the library.
              ${VIRO_CAPI_SRC}/Material_JNI.cpp
              ${VIRO_CAPI_SRC}/Texture_JNI.cpp
              ${VIRO_CAPI_SRC}/VideoTexture_JNI.cpp
+             ${VIRO_CAPI_SRC}/CameraTexture_JNI.cpp
              ${VIRO_CAPI_SRC}/AnimatedTexture_JNI.cpp
              ${VIRO_CAPI_SRC}/VideoDelegate_JNI.cpp
              ${VIRO_CAPI_SRC}/ViroContext_JNI.cpp
@@ -166,6 +183,10 @@ add_library( # Sets the name of the library.
              ${VIRO_RENDERER_SRC}/VROGeometry.cpp
              ${VIRO_RENDERER_SRC}/VROGeometryElement.cpp
              ${VIRO_RENDERER_SRC}/VROGeometrySource.cpp
+             ${VIRO_RENDERER_SRC}/VRODynamicGeometry.cpp
+             ${VIRO_RENDERER_SRC}/VRODynamicMeshNode.cpp
+             ${VIRO_RENDERER_SRC}/VROInputState.cpp
+             ${VIRO_RENDERER_SRC}/VROVirtualControllerRegistry.cpp
              ${VIRO_RENDERER_SRC}/VROMaterial.cpp
              ${VIRO_RENDERER_SRC}/VROMaterialVisual.cpp
              ${VIRO_RENDERER_SRC}/VROTexture.cpp
@@ -321,6 +342,8 @@ add_library( # Sets the name of the library.
              # Android JNI
              ${VIRO_ANDROID_SRC}/jni/VRORenderer_JNI.cpp
              ${VIRO_ANDROID_SRC}/jni/MediaRecorder_JNI.cpp
+             ${VIRO_ANDROID_SRC}/jni/VROVirtualController_JNI.cpp
+             ${VIRO_ANDROID_SRC}/jni/VROGameLoop_JNI.cpp
              ${VIRO_ANDROID_SRC}/jni/VRORendererARCore_JNI.cpp
              ${VIRO_ANDROID_SRC}/jni/VROCameraImageListener.cpp
              ${VIRO_ANDROID_SRC}/jni/ARImageDatabaseLoaderDelegate.cpp
@@ -378,12 +401,11 @@ set_target_properties( lib-gvr-audio
                        PROPERTIES IMPORTED_LOCATION
                        ${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libgvr_audio.so )
 
-add_library( lib-ovr
-             SHARED
-             IMPORTED )
-set_target_properties( lib-ovr
-                       PROPERTIES IMPORTED_LOCATION
-                       ${VIRO_ANDROID_LIBS}/${ANDROID_ABI}/libvrapi.so )
+# lib-ovr (libvrapi.so — Meta VrApi / Oculus Mobile SDK) removed in 2.57.3.
+# VrApi targets EOL hardware (GearVR / Oculus Go); all current Meta headsets use
+# the OpenXR path (libopenxr_loader.so). The prebuilt libvrapi.so was not 16 KB
+# page-size compliant (PT_GNU_RELRO not 16 KB-aligned) and crashed Android 15+
+# 16 KB devices on launch because libviro_renderer.so listed it as NEEDED (viro#491).
 
 add_library( lib-freetype
              SHARED
@@ -488,7 +510,6 @@ target_link_libraries( # Specifies the target library.
                        atomic
                        lib-gvr
                        lib-gvr-audio
-                       lib-ovr
                        lib-freetype
                        lib-protobuf
                        lib-BulletCollision
@@ -497,6 +518,7 @@ target_link_libraries( # Specifies the target library.
                        lib-LinearMath
 
                        ${RVCCA_LINK_LIB}
+                       ${OPENXR_LINK_LIB}
 
                        cpufeatures
                        ${lib-z}

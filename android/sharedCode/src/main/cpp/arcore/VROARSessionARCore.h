@@ -82,7 +82,8 @@ public:
      Must be called before setCloudAnchorProvider(ReactVision).
      Reads RVApiKey / RVProjectId from AndroidManifest meta-data if not called.
      */
-    void setReactVisionConfig(const std::string &apiKey, const std::string &projectId);
+    void setReactVisionConfig(const std::string &apiKey, const std::string &projectId,
+                              const std::string &endpoint = "");
 
     /*
      Update the cached GPS pose used by getCameraGeospatialPose() when the
@@ -154,6 +155,17 @@ public:
      */
     void setOcclusionMode(VROOcclusionMode mode) override;
     bool isOcclusionSupported() const override;
+    void onWorldMeshEnabled(bool enabled) override;
+    void setFrontCameraEnabled(bool enabled);
+    bool isFrontCameraEnabled() const { return _frontCameraEnabled; }
+
+    /*
+     Collect triangulated plane mesh data from all currently tracked ARCore planes.
+     Appends world-space vertices and indices into the provided vectors.
+     Called from VROARFrameARCore::generatePlaneMesh() on the render thread.
+     */
+    void collectPlaneMeshData(std::vector<VROVector3f>& vertices,
+                              std::vector<int>& indices) const;
     bool isOcclusionModeSupported(VROOcclusionMode mode) const override;
 
     /*
@@ -224,6 +236,10 @@ public:
         double confidence, int matchCount, int inlierCount, int processingTimeMs,
         const std::string& platform, const std::string& externalUserId,
         std::function<void(bool, std::string)> callback) override;
+    void rvGetProject(const std::string& projectId,
+        std::function<void(bool, std::string, std::string)> callback) override;
+    void rvGetScene(const std::string& sceneId,
+        std::function<void(bool, std::string, std::string)> callback) override;
     void rvGetSceneAssets(const std::string& sceneId,
         std::function<void(bool, std::string, std::string)> callback) override;
 
@@ -320,8 +336,12 @@ private:
     arcore::SemanticMode _semanticMode;
     arcore::GeospatialMode _geospatialMode;
     bool _semanticModeEnabled = false;
+    bool _worldMeshDepthNeeded = false;  // set by onWorldMeshEnabled
+    bool _frontCameraEnabled = false;            // use front camera via AR_AUGMENTED_FACE_MODE_MESH3D
+    bool _cloudAnchorsDisabledForFaceMode = false; // once disabled for face mode, keep disabled
 
     bool updateARCoreConfig();
+    arcore::DepthMode computeNeededDepthMode() const;
 
 #pragma mark - [Private] ARCore Image Tracking
 
@@ -369,6 +389,7 @@ private:
     std::shared_ptr<VROCloudAnchorProviderReactVision> _cloudAnchorProviderRV;
     std::string _rvApiKey;
     std::string _rvProjectId;
+    std::string _rvEndpoint;
 
     /*
      Manages geospatial anchors via ReactVision backend.

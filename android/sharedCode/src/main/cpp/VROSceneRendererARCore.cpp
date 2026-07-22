@@ -175,35 +175,82 @@ void VROSceneRendererARCore::updateARBackground(std::unique_ptr<VROARFrame> &fra
         forceReset = true;
     }
 
+    bool isFrontCamera = std::dynamic_pointer_cast<VROARSessionARCore>(_session)->isFrontCameraEnabled();
+    bool cameraSwitchPending = (isFrontCamera != _lastFrontCameraEnabled);
+    if (cameraSwitchPending) {
+        forceReset = true;
+    }
+
     bool geometryChanged = ((VROARFrameARCore *) frame.get())->hasDisplayGeometryChanged();
 
-    // Only update texture coordinates if geometry changed or forced
     if (forceReset || geometryChanged) {
         VROVector3f BL, BR, TL, TR;
         ((VROARFrameARCore *)frame.get())->getBackgroundTexcoords(&BL, &BR, &TL, &TR);
 
+        bool anyNaN = std::isnan(BL.x) || std::isnan(BL.y) || std::isnan(TL.x) || std::isnan(TL.y) ||
+                      std::isnan(BR.x) || std::isnan(BR.y) || std::isnan(TR.x) || std::isnan(TR.y);
+
+        if (!anyNaN) {
+            // Cache back camera texcoords — used as fallback for front camera since
+            // ArFrame_transformCoordinates2d always returns NaN in Augmented Faces mode.
+            if (!isFrontCamera) {
+                _lastBackBL = BL; _lastBackBR = BR;
+                _lastBackTL = TL; _lastBackTR = TR;
+                _hasBackTexcoords = true;
+            }
+        } else if (isFrontCamera) {
+            // Front camera (Augmented Faces) always returns NaN from transformCoordinates2d.
+            // Derive correct texcoords by inverting X on back camera values.
+            VROVector3f baseBL, baseBR, baseTL, baseTR;
+            if (_hasBackTexcoords) {
+                baseBL = _lastBackBL; baseBR = _lastBackBR;
+                baseTL = _lastBackTL; baseTR = _lastBackTR;
+            } else {
+                baseBL = VROVector3f(1.0f, 1.0f, 0); baseBR = VROVector3f(1.0f, 0.0f, 0);
+                baseTL = VROVector3f(0.0f, 1.0f, 0); baseTR = VROVector3f(0.0f, 0.0f, 0);
+            }
+            BL = baseBL; BL.x = 1.0f - BL.x;
+            BR = baseBR; BR.x = 1.0f - BR.x;
+            TL = baseTL; TL.x = 1.0f - TL.x;
+            TR = baseTR; TR.x = 1.0f - TR.x;
+            __android_log_print(ANDROID_LOG_INFO, "ViroARCore",
+                "updateARBackground: front fallback BL(%.3f,%.3f) TL(%.3f,%.3f) hasBack=%d",
+                BL.x, BL.y, TL.x, TL.y, _hasBackTexcoords ? 1 : 0);
+        } else if (_hasBackTexcoords) {
+            // Back camera returning NaN after switching from front camera — ARCore takes
+            // several frames to settle after the session reconfigure. Use cached values.
+            BL = _lastBackBL; BR = _lastBackBR;
+            TL = _lastBackTL; TR = _lastBackTR;
+            __android_log_print(ANDROID_LOG_INFO, "ViroARCore",
+                "updateARBackground: back NaN fallback BL(%.3f,%.3f) TL(%.3f,%.3f)",
+                BL.x, BL.y, TL.x, TL.y);
+        } else {
+            return;
+        }
+
         /*
-         Apply render zoom to camera background texture coordinates.
-         This crops into the center of the camera feed to match the projection zoom.
+         Apply render zoom after resolving the upstream front/back camera fallbacks.
+         This crops into the center of the camera feed to match the projection zoom,
+         while keeping the cached coordinates unzoomed for subsequent camera switches.
          */
         float renderZoom = _session->getRenderZoom();
         if (renderZoom > 1.0f) {
-            // Scale texture coordinates by 1/zoom (crops to center portion)
-            // and translate to center the crop
             float scale = 1.0f / renderZoom;
             float offset = (1.0f - scale) / 2.0f;
 
-            // Apply zoom transform to each texture coordinate
-            // Transform: newCoord = offset + oldCoord * scale
             BL = VROVector3f(offset + BL.x * scale, offset + BL.y * scale, BL.z);
             BR = VROVector3f(offset + BR.x * scale, offset + BR.y * scale, BR.z);
             TL = VROVector3f(offset + TL.x * scale, offset + TL.y * scale, TL.z);
             TR = VROVector3f(offset + TR.x * scale, offset + TR.y * scale, TR.z);
         }
 
+        __android_log_print(ANDROID_LOG_INFO, "ViroARCore",
+            "setTextureCoordinates [%s]: BL(%.3f,%.3f) TL(%.3f,%.3f) BR(%.3f,%.3f) TR(%.3f,%.3f)",
+            isFrontCamera ? "FRONT" : "BACK",
+            BL.x, BL.y, TL.x, TL.y, BR.x, BR.y, TR.x, TR.y);
         _cameraBackground->setTextureCoordinates(BL, BR, TL, TR);
+        _lastFrontCameraEnabled = isFrontCamera;
 
-        // Wait until we have these proper texture coordinates before installing the background
         if (!_sceneController->getScene()->getRootNode()->getBackground()) {
             _sceneController->getScene()->getRootNode()->setBackground(_cameraBackground);
         }
@@ -344,6 +391,14 @@ void VROSceneRendererARCore::renderWithTracking(const std::shared_ptr<VROARCamer
      */
     std::shared_ptr<VROARScene> scene = std::dynamic_pointer_cast<VROARScene>(_session->getScene());
     scene->updateAmbientLight(frame->getAmbientLightIntensity(), frame->getAmbientLightColor());
+
+    /*
+     Notify the scene once ARCore depth first becomes available, so the app knows hit
+     tests can now return DepthPoints. notifyDepthReady() is one-shot.
+     */
+    if (frame->hasDepthData()) {
+        scene->notifyDepthReady();
+    }
 }
 
 void VROSceneRendererARCore::setSemanticDebugEnabled(bool enabled) {

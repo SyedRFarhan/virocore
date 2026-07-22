@@ -61,6 +61,9 @@
 
 static bool kDebugTracking = false;
 
+// When false (default), per-frame depth-texture update diagnostic logs are suppressed.
+static const bool kDebugDepthTextureLogs = false;
+
 // Generate a random UUID v4 string (xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx).
 static std::string generateUUID() {
     uint8_t b[16];
@@ -279,9 +282,11 @@ bool VROARSessionARCore::setAnchorDetection(
 }
 
 void VROARSessionARCore::setReactVisionConfig(const std::string &apiKey,
-                                              const std::string &projectId) {
+                                              const std::string &projectId,
+                                              const std::string &endpoint) {
   _rvApiKey    = apiKey;
   _rvProjectId = projectId;
+  _rvEndpoint  = endpoint;
   // Credentials supplied — activate the ReactVision cloud anchor provider.
   setCloudAnchorProvider(VROCloudAnchorProvider::ReactVision);
 #if RVCCA_AVAILABLE
@@ -292,6 +297,7 @@ void VROARSessionARCore::setReactVisionConfig(const std::string &apiKey,
     ReactVisionCCA::RVCCAGeospatialProvider::Config cfg;
     cfg.apiKey    = _rvApiKey;
     cfg.projectId = _rvProjectId;
+    if (!_rvEndpoint.empty()) cfg.endpoint = _rvEndpoint;
     _geospatialProviderRV = std::make_shared<ReactVisionCCA::RVCCAGeospatialProvider>(cfg);
     pinfo("VROARSessionARCore: ReactVision Geospatial provider initialized");
   }
@@ -311,7 +317,7 @@ void VROARSessionARCore::setCloudAnchorProvider(
     // renderer-task batch.
     if (!_cloudAnchorProviderRV && !_rvApiKey.empty() && !_rvProjectId.empty()) {
       _cloudAnchorProviderRV = std::make_shared<VROCloudAnchorProviderReactVision>(
-          shared_from_this(), _rvApiKey, _rvProjectId);
+          shared_from_this(), _rvApiKey, _rvProjectId, _rvEndpoint);
       // Improvement 1 + 6B: register as frame listener so onFrameDidRender()
       // drives multi-frame host accumulation and resolve localization.
       if (_synchronizer) {
@@ -424,20 +430,92 @@ bool VROARSessionARCore::updateARCoreConfig() {
     }
   }
 
+  // ARCore Augmented Faces (front camera) requires:
+  //   - PlaneFinding    = DISABLED          (plane detection incompatible with front camera)
+  //   - LightEstimation = AMBIENT_INTENSITY  (ENVIRONMENTAL_HDR not supported)
+  //   - CloudAnchors    = DISABLED          (world tracking required for cloud anchors)
+  // Override these when front camera mode is active.
+  arcore::LightingMode effectiveLightingMode = _lightingMode;
+  arcore::PlaneFindingMode effectivePlaneFindingMode = _planeFindingMode;
+  // Once cloud anchors have been disabled for Augmented Faces, they cannot
+  // be re-enabled without recreating the session. Track whether this session
+  // has ever used Augmented Faces to keep cloud anchors disabled.
+  arcore::CloudAnchorMode effectiveCloudAnchorMode = _cloudAnchorMode;
+  if (_frontCameraEnabled) {
+      effectiveLightingMode     = arcore::LightingMode::AmbientIntensity;
+      effectivePlaneFindingMode = arcore::PlaneFindingMode::Disabled;
+      effectiveCloudAnchorMode  = arcore::CloudAnchorMode::Disabled;
+      _cloudAnchorsDisabledForFaceMode = true;
+      pinfo("ViroARCore: Augmented Faces — overriding lighting=Ambient, planes=Disabled, cloudAnchors=Disabled");
+  } else if (_cloudAnchorsDisabledForFaceMode) {
+      // After Augmented Faces, ARCore cannot restore ENVIRONMENTAL_HDR lighting
+      // or re-enable cloud anchors without recreating the session.
+      // Keep both disabled for the remainder of this session.
+      effectiveLightingMode    = arcore::LightingMode::AmbientIntensity;
+      effectiveCloudAnchorMode = arcore::CloudAnchorMode::Disabled;
+      pinfo("ViroARCore: keeping lighting=Ambient, cloudAnchors=Disabled after prior face mode session");
+  }
+
   arcore::Config *config =
-      _session->createConfig(_lightingMode, _planeFindingMode, _updateMode,
-                             _cloudAnchorMode, _focusMode, effectiveDepthMode, effectiveSemanticMode, effectiveGeospatialMode);
+      _session->createConfig(effectiveLightingMode, effectivePlaneFindingMode, _updateMode,
+                             effectiveCloudAnchorMode, _focusMode, effectiveDepthMode, effectiveSemanticMode, effectiveGeospatialMode);
 
   if (getImageTrackingImpl() == VROImageTrackingImpl::ARCore &&
       _currentARCoreImageDatabase) {
     config->setAugmentedImageDatabase(_currentARCoreImageDatabase);
   }
 
-  // ARCore requires the session to be paused before calling configure()
+  // Front camera / Augmented Faces mode
+  if (_frontCameraEnabled) {
+    config->setAugmentedFaceMode(true);
+  }
+
+  // ARCore requires the session to be paused before calling configure() or setCameraConfig().
   _session->pause();
+
+  // Reselect camera config for the correct facing direction while paused.
+  // Must be done after pause() and before configure().
+  // Always call selectCameraConfig when the facing direction changes — both
+  // front→back and back→front require an explicit hardware switch.
+  if (_frontCameraEnabled) {
+      _session->selectCameraConfig(true);
+  } else if (_cloudAnchorsDisabledForFaceMode) {
+      // Switching back to back camera after face mode — must explicitly
+      // reselect back camera hardware config (front was selected for face mode).
+      _session->selectCameraConfig(false);
+  }
 
   arcore::ConfigStatus status = _session->configure(config);
   delete (config);
+
+  // If configure fails with Augmented Face mode, ARCore does not support front
+  // camera without face tracking on this device.  Revert: reselect back camera
+  // config and reconfigure with the original (back camera) settings so the
+  // session resumes cleanly.  Clear _frontCameraEnabled so texcoord swaps
+  // do not corrupt the back camera feed.
+  if (status != arcore::ConfigStatus::Success && _frontCameraEnabled) {
+    pwarn("ViroARCore: Augmented Face Mode (front camera) not supported — reverting to back camera");
+    _frontCameraEnabled = false;
+
+    // Reselect back camera hardware config while still paused.
+    _session->selectCameraConfig(false);
+
+    // Reconfigure with back-camera settings. After Augmented Faces, ARCore
+    // cannot restore ENVIRONMENTAL_HDR or cloud anchors without recreating the
+    // session — keep both at the degraded values for this session's lifetime.
+    arcore::Config *backConfig =
+        _session->createConfig(arcore::LightingMode::AmbientIntensity,
+                               _planeFindingMode, _updateMode,
+                               arcore::CloudAnchorMode::Disabled, _focusMode, effectiveDepthMode,
+                               effectiveSemanticMode, effectiveGeospatialMode);
+    status = _session->configure(backConfig);
+    delete (backConfig);
+    if (status == arcore::ConfigStatus::Success) {
+      pinfo("ViroARCore: reverted to back camera successfully");
+    } else {
+      pwarn("ViroARCore: back camera revert also failed (status %d)", (int)status);
+    }
+  }
 
   if (status == arcore::ConfigStatus::Success) {
     _session->resume();
@@ -1425,8 +1503,9 @@ void VROARSessionARCore::setOcclusionMode(VROOcclusionMode mode) {
       break;
     case VROOcclusionMode::Disabled:
     default:
-      // Disable depth when occlusion is disabled
-      newDepthMode = arcore::DepthMode::Disabled;
+      // Keep depth active if world mesh still needs it
+      newDepthMode = _worldMeshDepthNeeded ? arcore::DepthMode::Automatic
+                                           : arcore::DepthMode::Disabled;
       break;
   }
 
@@ -1470,6 +1549,68 @@ bool VROARSessionARCore::isOcclusionModeSupported(VROOcclusionMode mode) const {
              _session->isSemanticModeSupported(arcore::SemanticMode::Enabled);
     default:
       return false;
+  }
+}
+
+arcore::DepthMode VROARSessionARCore::computeNeededDepthMode() const {
+  bool occlusionNeedsDepth = (getOcclusionMode() != VROOcclusionMode::Disabled);
+  return (_worldMeshDepthNeeded || occlusionNeedsDepth)
+      ? arcore::DepthMode::Automatic
+      : arcore::DepthMode::Disabled;
+}
+
+void VROARSessionARCore::setFrontCameraEnabled(bool enabled) {
+    _frontCameraEnabled = enabled;
+    if (_session != nullptr) {
+        // selectCameraConfig must be called while paused — handled inside updateARCoreConfig().
+        updateARCoreConfig();
+        pinfo("VROARSessionARCore: front camera (augmented face) %s",
+              enabled ? "enabled" : "disabled");
+    }
+}
+
+void VROARSessionARCore::onWorldMeshEnabled(bool enabled) {
+  _worldMeshDepthNeeded = enabled;
+  arcore::DepthMode needed = computeNeededDepthMode();
+  if (needed != _depthMode) {
+    _depthMode = needed;
+    if (_session != nullptr) {
+      updateARCoreConfig();
+      pinfo("VROARSessionARCore: world mesh %s, depth mode set to %d",
+            enabled ? "enabled" : "disabled", (int)_depthMode);
+    }
+  }
+}
+
+void VROARSessionARCore::collectPlaneMeshData(
+    std::vector<VROVector3f>& outVertices,
+    std::vector<int>& outIndices) const {
+
+  for (const auto& kv : _nativeAnchorMap) {
+    std::shared_ptr<VROARPlaneAnchor> planeAnchor =
+        std::dynamic_pointer_cast<VROARPlaneAnchor>(kv.second->getTrackable());
+    if (!planeAnchor) {
+      continue;
+    }
+
+    const std::vector<VROVector3f>& boundary = planeAnchor->getBoundaryVertices();
+    if (boundary.size() < 3) {
+      continue;
+    }
+
+    VROMatrix4f transform = planeAnchor->getTransform();
+    int baseIndex = (int)outVertices.size();
+
+    for (const VROVector3f& v : boundary) {
+      outVertices.push_back(transform.multiply(v));
+    }
+
+    // Fan triangulation from first vertex
+    for (int i = 1; i + 1 < (int)boundary.size(); ++i) {
+      outIndices.push_back(baseIndex);
+      outIndices.push_back(baseIndex + i);
+      outIndices.push_back(baseIndex + i + 1);
+    }
   }
 }
 
@@ -1634,6 +1775,7 @@ void VROARSessionARCore::checkVPSAvailability(double latitude, double longitude,
 // acquireNewAnchor. No VPS required — placed by GPS + compass + VIO.
 // AR placement math is delegated to RVCCAGeospatialProvider::computeArPosition()
 // (proprietary algorithm inside libreactvisioncca — not exposed in open-source virocore).
+#if RVCCA_AVAILABLE
 static std::shared_ptr<VROGeospatialAnchor> createLocalGPSAnchor(
     arcore::Session *session,
     const VROGeospatialPose &devicePose,
@@ -1679,6 +1821,7 @@ static std::shared_ptr<VROGeospatialAnchor> createLocalGPSAnchor(
     arSession->addAnchor(vAnchor);
     return geoAnchor;
 }
+#endif // RVCCA_AVAILABLE
 
 void VROARSessionARCore::createGeospatialAnchor(double latitude, double longitude, double altitude,
                                                 VROQuaternion quaternion,
@@ -2497,6 +2640,46 @@ void VROARSessionARCore::rvTrackCloudAnchorResolution(
     if (callback) callback(false, "ReactVision cloud anchor provider not available");
 }
 
+void VROARSessionARCore::rvGetProject(
+    const std::string& projectId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->getProject(projectId,
+                [callback](ReactVisionCCA::ApiResult<std::string> r) {
+                if (callback) {
+                    callback(r.success, r.data, r.success ? "" : r.error.message);
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessionARCore::rvGetScene(
+    const std::string& sceneId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+    if (_cloudAnchorProviderRV) {
+        auto p = _cloudAnchorProviderRV->getProvider();
+        if (p) {
+            p->getScene(sceneId,
+                [callback](ReactVisionCCA::ApiResult<std::string> r) {
+                if (callback) {
+                    callback(r.success, r.data, r.success ? "" : r.error.message);
+                }
+            });
+            return;
+        }
+    }
+#endif
+    if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
 void VROARSessionARCore::rvGetSceneAssets(
     const std::string& sceneId,
     std::function<void(bool, std::string, std::string)> callback) {
@@ -2593,7 +2776,7 @@ void VROARSessionARCore::updateDepthTexture() {
     int height = depthImage->getHeight();
 
     if (width <= 0 || height <= 0) {
-        pwarn("VROARSessionARCore: Invalid depth image dimensions: %d x %d", width, height);
+        if (kDebugDepthTextureLogs) pwarn("VROARSessionARCore: Invalid depth image dimensions: %d x %d", width, height);
         delete depthImage;
         return;
     }
@@ -2606,7 +2789,7 @@ void VROARSessionARCore::updateDepthTexture() {
     int rowStride = depthImage->getPlaneRowStride(0);
 
     if (depthData == nullptr || depthDataLength <= 0) {
-        pwarn("VROARSessionARCore: Invalid depth data. Length: %d", depthDataLength);
+        if (kDebugDepthTextureLogs) pwarn("VROARSessionARCore: Invalid depth data. Length: %d", depthDataLength);
         delete depthImage;
         return;
     }
@@ -2673,10 +2856,10 @@ void VROARSessionARCore::updateDepthTexture() {
                 glTexSubImage2D(target, 0, 0, 0, width, height, GL_RED, GL_FLOAT, floatData);
                 glBindTexture(target, 0);
             } else {
-                pwarn("VROARSessionARCore: Failed to get substrate for depth texture update");
+                if (kDebugDepthTextureLogs) pwarn("VROARSessionARCore: Failed to get substrate for depth texture update");
             }
         } else {
-            pwarn("VROARSessionARCore: Driver expired, cannot update depth texture");
+            if (kDebugDepthTextureLogs) pwarn("VROARSessionARCore: Driver expired, cannot update depth texture");
         }
     }
 

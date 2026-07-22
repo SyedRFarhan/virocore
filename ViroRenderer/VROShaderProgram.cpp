@@ -669,6 +669,7 @@ void VROShaderProgram::addStandardUniforms() {
     addUniform(VROShaderProperty::Mat4, 1, "ar_depth_texture_transform");
     addUniform(VROShaderProperty::Float, 1, "occlusion_z_near");
     addUniform(VROShaderProperty::Float, 1, "occlusion_z_far");
+    addUniform(VROShaderProperty::Float, 1, "ar_depth_is_monocular");
 
     // AR Semantic uniforms (used by semantic mask modifier, independent of depth occlusion)
     addUniform(VROShaderProperty::Mat4, 1, "ar_semantic_texture_transform");

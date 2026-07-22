@@ -159,6 +159,9 @@ VROARSessioniOS::VROARSessioniOS(VROTrackingType trackingType,
       _monocularDepthEnabled(false),
       _preferMonocularDepth(false),
       _monocularDepthLoading(false),
+      _monocularDepthScale(1.0f),
+      _monocularDepthTargetFPS(0),
+      _frontCameraEnabled(false),
       _needsGeospatialModeApply(false),
       _driver(driver) {
 
@@ -247,8 +250,42 @@ void VROARSessioniOS::setTrackingType(VROTrackingType trackingType) {
   run();
 }
 
+// Front-camera AR config provider, supplied at runtime by the optional
+// @reactvision/react-viro-face-tracking module. ViroKit never references the
+// ARKit face-tracking / TrueDepth API itself. The ObjC registration host lives
+// in VROFrontCameraProvider.{h,mm}.
+static VROARSessioniOS::VROARFrontCameraConfigProvider sFrontCameraConfigProvider = nil;
+
+void VROARSessioniOS::setFrontCameraConfigProvider(VROARSessioniOS::VROARFrontCameraConfigProvider provider) {
+    sFrontCameraConfigProvider = provider;
+}
+
+void VROARSessioniOS::setFrontCameraEnabled(bool enabled) {
+    _frontCameraEnabled = enabled;
+    NSLog(@"Front-camera AR: %s", enabled ? "YES" : "NO");
+    // Re-compute the session configuration with the new flag applied.
+    updateTrackingType(_trackingType);
+}
+
 void VROARSessioniOS::updateTrackingType(VROTrackingType trackingType) {
   _trackingType = trackingType;
+
+  // Front-camera AR — supplied by an optional external provider. ViroKit itself
+  // does not reference the ARKit face-tracking / TrueDepth API; the provider (if
+  // registered) returns a ready-to-run front-camera ARConfiguration.
+  if (_frontCameraEnabled) {
+    if (sFrontCameraConfigProvider != nil) {
+      ARConfiguration *frontConfig = sFrontCameraConfigProvider();
+      if (frontConfig != nil) {
+        NSLog(@"Front-camera AR configuration provided by external module");
+        _sessionConfiguration = frontConfig;
+        return;
+      }
+      NSLog(@"Front-camera config provider returned nil (unsupported device) — falling through to world tracking");
+    } else {
+      NSLog(@"Front-camera AR requested but no provider registered — install @reactvision/react-viro-face-tracking. Falling through to world tracking.");
+    }
+  }
 
   if (getTrackingType() == VROTrackingType::DOF3) {
     NSLog(@"DOF3 tracking configuration");
@@ -289,6 +326,19 @@ void VROARSessioniOS::updateTrackingType(VROTrackingType trackingType) {
     if (@available(iOS 12.0, *)) {
       _arKitObjectDetectionSet = [[NSMutableSet alloc] init];
       config.detectionObjects = _arKitObjectDetectionSet;
+    }
+#endif
+
+    // Enable scene reconstruction (ARMeshAnchor) on LiDAR-capable devices.
+    // ARKit accumulates the mesh persistently across the session, which is consumed
+    // by VROARWorldMesh::generateMeshAnchorMesh() as the primary world-mesh source.
+#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 130400
+    if (@available(iOS 13.4, *)) {
+      if ([ARWorldTrackingConfiguration
+              supportsSceneReconstruction:ARSceneReconstructionMesh]) {
+        config.sceneReconstruction = ARSceneReconstructionMesh;
+        pinfo("VROARSession: ARSceneReconstructionMesh enabled (LiDAR device)");
+      }
     }
 #endif
 
@@ -593,10 +643,12 @@ void VROARSessioniOS::setCloudAnchorProvider(VROCloudAnchorProvider provider) {
     // Initialize ReactVision cloud anchor provider; reads credentials from Info.plist
     NSString *apiKey    = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"RVApiKey"];
     NSString *projectId = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"RVProjectId"];
+    NSString *endpoint  = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"RVEndpoint"];
+
     if (apiKey.length && projectId.length) {
       if (_cloudAnchorProviderRV == nil) {
         _cloudAnchorProviderRV = [[VROCloudAnchorProviderReactVision alloc]
-            initWithApiKey:apiKey projectId:projectId endpoint:nil];
+            initWithApiKey:apiKey projectId:projectId endpoint:endpoint];
         if (_cloudAnchorProviderRV) {
           pinfo("ReactVision Cloud Anchor provider initialized successfully");
         } else {
@@ -611,6 +663,7 @@ void VROARSessioniOS::setCloudAnchorProvider(VROCloudAnchorProvider provider) {
         ReactVisionCCA::RVCCAGeospatialProvider::Config cfg;
         cfg.apiKey    = std::string([apiKey UTF8String]);
         cfg.projectId = std::string([projectId UTF8String]);
+        if (endpoint.length) cfg.endpoint = std::string([endpoint UTF8String]);
         _rvGeoProjectId = cfg.projectId;
         _geospatialProviderRV = std::make_shared<ReactVisionCCA::RVCCAGeospatialProvider>(cfg);
         pinfo("ReactVision Geospatial provider initialized via setCloudAnchorProvider");
@@ -1003,6 +1056,8 @@ std::unique_ptr<VROARFrame> &VROARSessioniOS::updateFrame() {
   // or monocular depth is explicitly preferred.
   if (_monocularDepthEnabled && _monocularDepthEstimator) {
     if (_preferMonocularDepth || !frameiOS->hasLiDARDepth()) {
+      // W4: upload previous frame's pending depth data on the render (GL) thread
+      _monocularDepthEstimator->flushPendingDepthUpdate();
       _monocularDepthEstimator->update(frameiOS);
     }
   }
@@ -1318,20 +1373,32 @@ void VROARSessioniOS::setMonocularDepthEnabled(bool enabled) {
         frameworkBundle = [NSBundle mainBundle];
       }
 
-      NSString *bundledPath = [frameworkBundle pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+      // Priority order: DAv2 metric indoor > DepthPro > DAv2 relative (needs calibration)
+      // DAv2-metric-hypersim gives the best indoor AR accuracy at same speed as DepthPro.
+      NSArray<NSString *> *candidates = @[
+          @"DepthAnythingV2_metric_indoor",   // DAv2 metric, Hypersim-trained (best indoor)
+          @"DepthAnythingV2_metric_outdoor",  // DAv2 metric, KITTI-trained
+          @"DepthPro",                         // Apple DepthPro metric
+          @"DepthAnythingV2",                  // DAv2 relative (needs _depthScaleFactor calibration)
+      ];
 
-      // Fallback to main app bundle (for custom deployments)
-      if (!bundledPath) {
-        bundledPath = [[NSBundle mainBundle] pathForResource:@"DepthPro" ofType:@"mlmodelc"];
+      NSString *bundledPath = nil;
+      for (NSString *name in candidates) {
+          bundledPath = [frameworkBundle pathForResource:name ofType:@"mlmodelc"];
+          if (!bundledPath) {
+              bundledPath = [[NSBundle mainBundle] pathForResource:name ofType:@"mlmodelc"];
+          }
+          if (bundledPath) {
+              NSLog(@"[ViroDepth] Using depth model: %@ at %@", name, bundledPath);
+              break;
+          }
       }
 
       if (bundledPath) {
-        NSLog(@"DepthPro model found at: %s", [bundledPath UTF8String]);
-        pinfo("DepthPro model found at: %s", [bundledPath UTF8String]);
         strongSelf->initializeMonocularDepthEstimator(bundledPath);
       } else {
-        NSLog(@"DepthPro.mlmodelc not found in bundle - monocular depth unavailable");
-        pwarn("DepthPro.mlmodelc not found in bundle - monocular depth unavailable");
+        NSLog(@"No depth model found in bundle - tried: %@", [candidates componentsJoinedByString:@", "]);
+        pwarn("No monocular depth model found in bundle");
       }
 
       strongSelf->_monocularDepthLoading = false;
@@ -1388,6 +1455,23 @@ bool VROARSessioniOS::isPreferMonocularDepth() const {
     return _preferMonocularDepth;
 }
 
+void VROARSessioniOS::setMonocularDepthTargetFPS(int fps) {
+    if (_monocularDepthEstimator) {
+        _monocularDepthEstimator->setTargetFPS(fps);
+        NSLog(@"[ViroDepth] Monocular depth target FPS set to %d", fps);
+    }
+    _monocularDepthTargetFPS = fps;
+}
+
+void VROARSessioniOS::setMonocularDepthScale(float scale) {
+    if (_monocularDepthEstimator) {
+        _monocularDepthEstimator->setScaleFactor(scale);
+        NSLog(@"[ViroDepth] Monocular depth scale set to %.3f", scale);
+    }
+    // Store so we can apply when the estimator loads later
+    _monocularDepthScale = scale;
+}
+
 void VROARSessioniOS::initializeMonocularDepthEstimator(NSString *modelPath) {
     NSLog(@"Initializing monocular depth estimator with model: %s", [modelPath UTF8String]);
     pinfo("Initializing monocular depth estimator with model: %s", [modelPath UTF8String]);
@@ -1405,6 +1489,19 @@ void VROARSessioniOS::initializeMonocularDepthEstimator(NSString *modelPath) {
         _monocularDepthEstimator.reset();
         return;
     }
+
+    if (_monocularDepthScale != 1.0f) {
+        _monocularDepthEstimator->setScaleFactor(_monocularDepthScale);
+        NSLog(@"[ViroDepth] Applied pending depth scale: %.3f", _monocularDepthScale);
+    }
+    if (_monocularDepthTargetFPS > 0) {
+        _monocularDepthEstimator->setTargetFPS(_monocularDepthTargetFPS);
+        NSLog(@"[ViroDepth] Applied pending target FPS: %d", _monocularDepthTargetFPS);
+    }
+
+    // Force ANE model specialization now so the first real inference (and thus the
+    // first usable depth frame) isn't delayed by many seconds of cold-start compile.
+    _monocularDepthEstimator->warmup();
 
     NSLog(@"SUCCESS: Monocular depth estimator initialized and model loaded successfully");
     pinfo("Monocular depth estimator initialized and model loaded successfully");
@@ -1816,9 +1913,9 @@ void VROARSessioniOS::updateAnchor(ARAnchor *anchor) {
       }
     }
       */
-  } else {
-    pinfo("Anchor %@ not found!", anchor.identifier);
   }
+  // else: anchor not in _nativeAnchorMap — normal for ARMeshAnchors, CCA anchors
+  // received before ViroReact has processed them. No log needed.
 }
 
 void VROARSessioniOS::removeAnchor(ARAnchor *anchor) {
@@ -1957,6 +2054,7 @@ void VROARSessioniOS::checkVPSAvailability(double latitude, double longitude,
 // Create a native ARKit local anchor at the GPS-computed world position.
 // AR placement math is delegated to RVCCAGeospatialProvider::computeArPosition()
 // (proprietary algorithm inside libreactvisioncca — not exposed in open-source virocore).
+#if RVCCA_AVAILABLE
 static std::shared_ptr<VROGeospatialAnchor> createLocalGPSAnchor(
     const VROGeospatialPose &devicePose,
     double anchorLat, double anchorLng, double anchorAlt,
@@ -2753,6 +2851,42 @@ void VROARSessioniOS::rvTrackCloudAnchorResolution(
   if (callback) callback(false, "ReactVision cloud anchor provider not available");
 }
 
+void VROARSessioniOS::rvGetProject(
+    const std::string& projectId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+  auto p = [_cloudAnchorProviderRV cppProvider];
+  if (p) {
+    p->getProject(projectId,
+        [callback](ReactVisionCCA::ApiResult<std::string> r) {
+      if (callback) {
+        callback(r.success, r.data, r.success ? "" : r.error.message);
+      }
+    });
+    return;
+  }
+#endif
+  if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
+void VROARSessioniOS::rvGetScene(
+    const std::string& sceneId,
+    std::function<void(bool, std::string, std::string)> callback) {
+#if RVCCA_AVAILABLE
+  auto p = [_cloudAnchorProviderRV cppProvider];
+  if (p) {
+    p->getScene(sceneId,
+        [callback](ReactVisionCCA::ApiResult<std::string> r) {
+      if (callback) {
+        callback(r.success, r.data, r.success ? "" : r.error.message);
+      }
+    });
+    return;
+  }
+#endif
+  if (callback) callback(false, "", "ReactVision cloud anchor provider not available");
+}
+
 void VROARSessioniOS::rvGetSceneAssets(
     const std::string& sceneId,
     std::function<void(bool, std::string, std::string)> callback) {
@@ -2914,7 +3048,6 @@ std::shared_ptr<VROTexture> VROARSessioniOS::getSemanticTexture() {
   bool log = (++diagCounter % 60 == 0); // log once per ~second
 
   if (!_semanticModeEnabled) {
-    if (log) pinfo("[Semantics] getSemanticTexture: _semanticModeEnabled=false");
     return nullptr;
   }
   if (_cloudAnchorProviderARCore == nil) {

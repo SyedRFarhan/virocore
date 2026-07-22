@@ -150,6 +150,7 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
     bool _depthDebugEnabled;
     float _depthDebugOpacity;
     VROMatrix4f _depthTextureTransform;
+    VROMatrix4f _depthDebugTextureTransform;
     VROViewport _currentViewport;
 
     // Scan wave effect state
@@ -481,6 +482,14 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
 }
 
 - (void)deleteGL {
+    // Stop receiving UIApplication lifecycle notifications as soon as teardown begins.
+    // Otherwise a background/foreground transition after the AR scene is navigated away
+    // (but before this view is fully deallocated) delivers applicationWillResignActive: to
+    // a torn-down view — touching a freed display link / AR session, or crashing with
+    // "unrecognized selector sent to deallocated instance" (GitHub #399). dealloc also
+    // removes observers; removeObserver:self is idempotent so the double-remove is safe.
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+
     // Clean up view recorder first
     [self.viewRecorder deleteGL];
 
@@ -1128,6 +1137,14 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
      */
     std::shared_ptr<VROARScene> scene = std::dynamic_pointer_cast<VROARScene>(_arSession->getScene());
     scene->updateAmbientLight(frame->getAmbientLightIntensity(), frame->getAmbientLightColor());
+
+    /*
+     Notify the scene once depth (LiDAR or monocular) first becomes available, so the
+     app knows hit tests can now return DepthPoints. notifyDepthReady() is one-shot.
+     */
+    if (frame->hasDepthData()) {
+        scene->notifyDepthReady();
+    }
 }
 
 - (void)renderWithTracking:(const std::shared_ptr<VROARCamera>) camera
@@ -1184,12 +1201,19 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
 
     // Store for debug modifier uniform binders
     _depthTextureTransform = depthTextureTransform;
+    // Debug transform: no ScaleFill crop → full-screen coverage (monocular-only difference)
+    if (depthTexture) {
+        _depthDebugTextureTransform = frame->getDepthDebugTextureTransform();
+    } else {
+        _depthDebugTextureTransform = VROMatrix4f::identity();
+    }
 
     // CRITICAL: Set occlusion info on the render context BEFORE prepareFrame
     // so that shader capability keys include arOcclusion during scene traversal.
     _renderer->setOcclusionMode(occlusionMode);
     _renderer->setDepthTexture(depthTexture);
     _renderer->setDepthTextureTransform(depthTextureTransform);
+    _renderer->setDepthIsMonocular(depthTexture != nullptr && [self isPreferMonocularDepth]);
 
     // Expose live camera feed to shader modifiers via 'camera_texture' sampler
     _renderer->setCameraBackgroundTexture(_arSession->getCameraBackgroundTexture());
@@ -1204,31 +1228,6 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
 
     _pointOfView->getCamera()->setPosition(position);
     _renderer->prepareFrame(_frame, viewport, fov, rotation, projection, _driver);
-
-    // DEBUG: Occlusion debug logging (every 60 frames)
-    // Uncomment for debugging: occlusionMode, depthTexture, transform, viewport, camera image dimensions
-    /*
-    static int occDebugCounter = 0;
-    if (occDebugCounter++ % 60 == 0) {
-        NSLog(@"DEBUG occlusionMode=%d, depthTexture=%p, hydrated=%d",
-              (int)occlusionMode, depthTexture.get(),
-              depthTexture ? depthTexture->isHydrated() : -1);
-        if (depthTexture) {
-            NSLog(@"DEBUG depthTexture size=%dx%d", depthTexture->getWidth(), depthTexture->getHeight());
-            NSLog(@"DEBUG transform: [%.3f, %.3f, 0, 0]", depthTextureTransform[0], depthTextureTransform[1]);
-            NSLog(@"DEBUG           [%.3f, %.3f, 0, 0]", depthTextureTransform[4], depthTextureTransform[5]);
-            NSLog(@"DEBUG           tx=%.3f, ty=%.3f", depthTextureTransform[12], depthTextureTransform[13]);
-            NSLog(@"DEBUG viewport=%dx%d", viewport.getWidth(), viewport.getHeight());
-            const VROARFrameiOS *frameiOS = dynamic_cast<const VROARFrameiOS *>(frame.get());
-            if (frameiOS) {
-                CVPixelBufferRef camImg = frameiOS->getImage();
-                if (camImg) {
-                    NSLog(@"DEBUG camImage=%zux%zu", CVPixelBufferGetWidth(camImg), CVPixelBufferGetHeight(camImg));
-                }
-            }
-        }
-    }
-    */
 
     _renderer->renderEye(VROEyeType::Monocular, _renderer->getLookAtMatrix(), projection, viewport, _driver);
     _renderer->renderHUD(VROEyeType::Monocular, VROMatrix4f::identity(), projection, _driver);
@@ -1302,7 +1301,9 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
                 [weakSelf](VROUniform *uniform, const VROGeometry *geometry, const VROMaterial *material) {
                     VROViewAR *strongSelf = weakSelf;
                     if (strongSelf) {
-                        uniform->setMat4(strongSelf->_depthTextureTransform);
+                        // Use the no-crop debug transform so depth fills the full
+                        // screen without magenta bands at the ScaleFill coverage edges.
+                        uniform->setMat4(strongSelf->_depthDebugTextureTransform);
                     }
                 });
 
@@ -1830,6 +1831,46 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
         }
     }
     return NO;
+}
+
+- (void)setMonocularDepthScale:(float)scale {
+    if (self.trackingType == VROTrackingType::DOF6) {
+        std::shared_ptr<VROARSessioniOS> session = std::dynamic_pointer_cast<VROARSessioniOS>([self getARSession]);
+        if (session) {
+            session->setMonocularDepthScale(scale);
+        }
+    }
+}
+
+- (void)setMonocularDepthTargetFPS:(int)fps {
+    if (self.trackingType == VROTrackingType::DOF6) {
+        std::shared_ptr<VROARSessioniOS> session = std::dynamic_pointer_cast<VROARSessioniOS>([self getARSession]);
+        if (session) {
+            session->setMonocularDepthTargetFPS(fps);
+        }
+    }
+}
+
+- (void)setFrontCameraEnabled:(BOOL)enabled {
+    std::shared_ptr<VROARSessioniOS> session = std::dynamic_pointer_cast<VROARSessioniOS>([self getARSession]);
+    if (!session) return;
+
+    session->setFrontCameraEnabled(enabled); // also calls updateTrackingType internally
+
+    // If session already running, hot-swap the config via ARKit directly.
+    // ARKit supports calling runWithConfiguration: on a live session.
+    // Do NOT call session->run() here — that recreates the delegate and
+    // would race with an in-flight render frame.
+    if (!session->isPaused()) {
+        ARConfiguration *newConfig = session->getSessionConfiguration();
+        if (newConfig) {
+            ARSession *arSession = session->getARSession();
+            [arSession runWithConfiguration:newConfig
+                                    options:ARSessionRunOptionResetTracking];
+        }
+    }
+    // If paused/not yet started, the next run() call from normal init flow
+    // will use the already-updated _sessionConfiguration.
 }
 
 @end

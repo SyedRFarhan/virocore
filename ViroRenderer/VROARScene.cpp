@@ -257,6 +257,18 @@ void VROARScene::setTrackingState(VROARTrackingState state, VROARTrackingStateRe
     }
 }
 
+void VROARScene::notifyDepthReady() {
+    if (_depthReadyNotified) {
+        return;
+    }
+    _depthReadyNotified = true;
+
+    std::shared_ptr<VROARSceneDelegate> delegate = _delegate.lock();
+    if (delegate) {
+        delegate->onDepthReady();
+    }
+}
+
 void VROARScene::updateAmbientLight(float intensity, VROVector3f color) {
     _ambientLightIntensity = intensity;
     _ambientLightColor = color;
@@ -301,6 +313,12 @@ void VROARScene::setWorldMeshEnabled(bool enabled) {
 
     if (_worldMesh) {
         _worldMesh->setEnabled(enabled);
+    }
+
+    // Notify the platform session so it can activate depth sensing if needed
+    std::shared_ptr<VROARSession> arSession = _arSession.lock();
+    if (arSession) {
+        arSession->onWorldMeshEnabled(enabled);
     }
 
     pinfo("VROARScene: World mesh %s", enabled ? "enabled" : "disabled");

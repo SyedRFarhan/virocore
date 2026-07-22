@@ -33,6 +33,49 @@
 #include "VROARPlaneAnchor.h"
 
 /**
+ * Sanitizes a C++ string to be valid Modified UTF-8 for use with JNI NewStringUTF.
+ *
+ * Android 14+ (API 34) ART aborts if NewStringUTF receives bytes that are not valid
+ * Modified UTF-8. ARCore anchor IDs are opaque byte strings and are not guaranteed
+ * to be valid Modified UTF-8.
+ *
+ * Valid sequences kept as-is; invalid bytes replaced with '?'.
+ * Null bytes (0x00) are re-encoded as the two-byte Modified UTF-8 null (0xC0 0x80).
+ */
+static std::string sanitizeForNewStringUTF(const std::string &input) {
+    std::string result;
+    result.reserve(input.size());
+    size_t i = 0;
+    while (i < input.size()) {
+        unsigned char c = (unsigned char)input[i];
+        if (c == 0x00) {
+            result += (char)0xC0;
+            result += (char)0x80;
+            i++;
+        } else if (c < 0x80) {
+            result += (char)c;
+            i++;
+        } else if ((c & 0xE0) == 0xC0 && i + 1 < input.size()
+                   && ((unsigned char)input[i + 1] & 0xC0) == 0x80) {
+            result += (char)c;
+            result += input[i + 1];
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0 && i + 2 < input.size()
+                   && ((unsigned char)input[i + 1] & 0xC0) == 0x80
+                   && ((unsigned char)input[i + 2] & 0xC0) == 0x80) {
+            result += (char)c;
+            result += input[i + 1];
+            result += input[i + 2];
+            i += 3;
+        } else {
+            result += '?';
+            i++;
+        }
+    }
+    return result;
+}
+
+/**
  * Creates an ARAnchor from the given VROARAnchor.
  * Handles VROARAnchorARCore, VROGeospatialAnchor, and other anchor types.
  */
@@ -45,8 +88,8 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
 
     std::shared_ptr<VROARAnchorARCore> vAnchor = std::dynamic_pointer_cast<VROARAnchorARCore>(anchor);
 
-    const char *anchorId_c = anchor->getId().c_str();
-    VRO_STRING anchorId = VRO_NEW_STRING(anchorId_c);
+    std::string anchorId_sanitized = sanitizeForNewStringUTF(anchor->getId());
+    VRO_STRING anchorId = VRO_NEW_STRING(anchorId_sanitized.c_str());
 
     // Resolve the cloud anchor ID string for both the Google ARCore and RVCA code paths.
     //
@@ -68,7 +111,7 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
             cloudAnchorId_s = anchor->getCloudAnchorId();    // VROARAnchor base-class field (RVCA path)
         }
         if (!cloudAnchorId_s.empty()) {
-            cloudAnchorId = VRO_NEW_STRING(cloudAnchorId_s.c_str());
+            cloudAnchorId = VRO_NEW_STRING(sanitizeForNewStringUTF(cloudAnchorId_s).c_str());
         }
     }
 
@@ -128,6 +171,28 @@ VRO_OBJECT ARUtilsCreateJavaARAnchorFromAnchor(std::shared_ptr<VROARAnchor> anch
                                                       anchorId, type, positionArray, rotationArray,
                                                       scaleArray, trackingMethod);
             }
+        }
+    }
+
+    // Non-ARCore plane anchor (e.g. OpenXR / Quest XR_FB_scene): the anchor is a
+    // direct VROARPlaneAnchor, not wrapped in a VROARAnchorARCore, so the block
+    // above is skipped. Serialize its plane fields here so onAnchorFound /
+    // ViroARPlane receive type="plane" + alignment / extent / center / vertices.
+    if (!result) {
+        std::shared_ptr<VROARPlaneAnchor> plane = std::dynamic_pointer_cast<VROARPlaneAnchor>(anchor);
+        if (plane) {
+            VRO_STRING alignment      = ARUtilsCreateStringFromAlignment(plane->getAlignment());
+            VRO_STRING classification = ARUtilsCreateStringFromClassification(plane->getClassification());
+            VRO_FLOAT_ARRAY extentArray   = ARUtilsCreateFloatArrayFromVector3f(plane->getExtent());
+            VRO_FLOAT_ARRAY centerArray   = ARUtilsCreateFloatArrayFromVector3f(plane->getCenter());
+            VRO_FLOAT_ARRAY polygonPoints = ARUtilsCreatePointsArray(plane->getBoundaryVertices());
+            VRO_STRING type = VRO_NEW_STRING("plane");
+            result = VROPlatformConstructHostObject(
+                "com/viro/core/ARPlaneAnchor",
+                "(Ljava/lang/String;Ljava/lang/String;[F[F[FLjava/lang/String;[F[F[FLjava/lang/String;)V",
+                anchorId, type, positionArray, rotationArray,
+                scaleArray, alignment, extentArray, centerArray,
+                polygonPoints, classification);
         }
     }
 
