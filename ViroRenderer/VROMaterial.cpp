@@ -510,3 +510,26 @@ void VROMaterial::applySemanticMaskModifier() {
 
     addShaderModifier(_semanticMaskModifier);
 }
+
+__attribute__((visibility("default")))
+void VROMaterial::addShaderModifier(std::shared_ptr<VROShaderModifier> modifier) {
+    _shaderModifiers.push_back(modifier);
+    updateSubstrate();
+}
+
+__attribute__((visibility("default")))
+void VROMaterial::removeShaderModifier(std::shared_ptr<VROShaderModifier> modifier) {
+    _shaderModifiers.erase(std::remove(_shaderModifiers.begin(), _shaderModifiers.end(), modifier), _shaderModifiers.end());
+    updateSubstrate();
+}
+
+__attribute__((visibility("default")))
+bool VROMaterial::hasShaderModifier(std::shared_ptr<VROShaderModifier> modifier) {
+    return std::find(_shaderModifiers.begin(), _shaderModifiers.end(), modifier) != _shaderModifiers.end();
+}
+
+__attribute__((visibility("default")))
+void VROMaterial::removeAllShaderModifiers() {
+    _shaderModifiers.clear();
+    updateSubstrate();
+}
