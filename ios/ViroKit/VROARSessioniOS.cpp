@@ -2054,7 +2054,6 @@ void VROARSessioniOS::checkVPSAvailability(double latitude, double longitude,
 // Create a native ARKit local anchor at the GPS-computed world position.
 // AR placement math is delegated to RVCCAGeospatialProvider::computeArPosition()
 // (proprietary algorithm inside libreactvisioncca — not exposed in open-source virocore).
-#if RVCCA_AVAILABLE
 static std::shared_ptr<VROGeospatialAnchor> createLocalGPSAnchor(
     const VROGeospatialPose &devicePose,
     double anchorLat, double anchorLng, double anchorAlt,
@@ -3170,4 +3169,3 @@ std::shared_ptr<VROTexture> VROARSessioniOS::getSemanticConfidenceTexture() {
 @end
 
 #endif
-
