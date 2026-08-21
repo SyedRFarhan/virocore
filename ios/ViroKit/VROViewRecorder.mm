@@ -458,20 +458,42 @@
 #pragma mark - Audio Recording
 
 - (NSURL *)startAudioRecordingInternal:(NSString *)fileName {
-    // Ensure audio session is properly configured and activated for recording
+    // Arm into the audio session rather than seizing it.
+    //
+    // FORK CHANGE: this previously called setCategory + setActive on every
+    // record start. When the host app already owns a configured session — a
+    // streaming voice engine, a live assistant, another recorder — that
+    // reconfiguration silently DROPS the owner's options. Two concrete losses
+    // observed in ReportCam: `mixWithOthers` (clobbering the engine's parallel
+    // mic tap and playback) and `allowHapticsAndSystemSoundsDuringRecording`
+    // (killing every haptic in the app for the duration). It can also force the
+    // route to speaker and glitch the owner's input mid-conversation.
+    //
+    // If the session is already PlayAndRecord, someone configured it
+    // deliberately and it is already active, so recording can simply start.
+    // Only configure when nothing has — the standalone case, where this is the
+    // original behavior unchanged.
     AVAudioSession *audioSession = [AVAudioSession sharedInstance];
     NSError *sessionError;
 
-    // Set category to allow recording with playback
-    if (![audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
-                       withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
-                             error:&sessionError]) {
-        NSLog(@"[Recording] Failed to set audio session category: %@", sessionError.localizedDescription);
-    }
+    BOOL sessionAlreadyOwned =
+        [audioSession.category isEqualToString:AVAudioSessionCategoryPlayAndRecord];
 
-    // Activate the audio session
-    if (![audioSession setActive:YES error:&sessionError]) {
-        NSLog(@"[Recording] Failed to activate audio session: %@", sessionError.localizedDescription);
+    if (sessionAlreadyOwned) {
+        NSLog(@"[Recording] Audio session already in PlayAndRecord (host-owned) —"
+               " arming into it; category, options and activation left untouched");
+    } else {
+        // Set category to allow recording with playback
+        if (![audioSession setCategory:AVAudioSessionCategoryPlayAndRecord
+                           withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetooth
+                                 error:&sessionError]) {
+            NSLog(@"[Recording] Failed to set audio session category: %@", sessionError.localizedDescription);
+        }
+
+        // Activate the audio session
+        if (![audioSession setActive:YES error:&sessionError]) {
+            NSLog(@"[Recording] Failed to activate audio session: %@", sessionError.localizedDescription);
+        }
     }
 
     NSDictionary *audioRecordSettings = @{
