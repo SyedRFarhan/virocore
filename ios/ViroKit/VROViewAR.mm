@@ -643,8 +643,33 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
             return;
         }
 
+        // The sensor frame arrives in landscape-right camera orientation;
+        // record how the interface is oriented NOW (main thread) so the
+        // async callback can rotate the frame to match what was on screen.
+        UIInterfaceOrientation interfaceOrientation = UIInterfaceOrientationPortrait;
+        UIWindowScene *scene = self.window.windowScene;
+        if (scene) {
+            interfaceOrientation = scene.interfaceOrientation;
+        }
+        CGImagePropertyOrientation frameOrientation;
+        switch (interfaceOrientation) {
+            case UIInterfaceOrientationLandscapeRight:
+                frameOrientation = kCGImagePropertyOrientationUp;
+                break;
+            case UIInterfaceOrientationLandscapeLeft:
+                frameOrientation = kCGImagePropertyOrientationDown;
+                break;
+            case UIInterfaceOrientationPortraitUpsideDown:
+                frameOrientation = kCGImagePropertyOrientationLeft;
+                break;
+            case UIInterfaceOrientationPortrait:
+            default:
+                frameOrientation = kCGImagePropertyOrientationRight;
+                break;
+        }
+
         // Capture high-resolution frame
-        bool supported = sessioniOS->captureHighResolutionFrame([self, fileName, saveToCamera, completionHandler, sceneSnapshot](
+        bool supported = sessioniOS->captureHighResolutionFrame([self, fileName, saveToCamera, completionHandler, sceneSnapshot, frameOrientation](
                 CVPixelBufferRef image, VROMatrix4f cameraTransform, NSError *error) {
             @autoreleasepool {
                 if (error || !image) {
@@ -652,18 +677,38 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
                     return;
                 }
 
-                // Get image dimensions
-                size_t width = CVPixelBufferGetWidth(image);
-                size_t height = CVPixelBufferGetHeight(image);
+                // Rotate the sensor frame to the interface orientation the
+                // shot was framed in, then aspect-fill crop it to the screen's
+                // aspect — the viewport shows a center-crop of the camera
+                // image, so this reproduces what the user actually saw. The
+                // old path skipped both steps and non-uniformly stretched the
+                // portrait scene snapshot over the landscape sensor frame.
+                CIImage *cameraImage = [[CIImage imageWithCVPixelBuffer:image]
+                                        imageByApplyingOrientation:frameOrientation];
+                CGRect cameraExtent = cameraImage.extent;
 
-                // Convert CVPixelBuffer to CIImage
-                CIImage *cameraImage = [CIImage imageWithCVPixelBuffer:image];
+                CGFloat targetAspect = sceneSnapshot.size.width / sceneSnapshot.size.height;
+                CGFloat frameAspect = cameraExtent.size.width / cameraExtent.size.height;
+                CGRect crop = cameraExtent;
+                if (frameAspect > targetAspect) {
+                    CGFloat cropWidth = cameraExtent.size.height * targetAspect;
+                    crop = CGRectMake(cameraExtent.origin.x + (cameraExtent.size.width - cropWidth) / 2.0,
+                                      cameraExtent.origin.y, cropWidth, cameraExtent.size.height);
+                } else if (frameAspect < targetAspect) {
+                    CGFloat cropHeight = cameraExtent.size.width / targetAspect;
+                    crop = CGRectMake(cameraExtent.origin.x,
+                                      cameraExtent.origin.y + (cameraExtent.size.height - cropHeight) / 2.0,
+                                      cameraExtent.size.width, cropHeight);
+                }
+                cameraImage = [[cameraImage imageByCroppingToRect:crop]
+                               imageByApplyingTransform:CGAffineTransformMakeTranslation(-crop.origin.x,
+                                                                                         -crop.origin.y)];
 
-                // Convert scene snapshot to CIImage and scale to match camera resolution
-                CIImage *sceneImage = [[CIImage alloc] initWithImage:sceneSnapshot];
-                CGFloat scaleX = (CGFloat)width / sceneSnapshot.size.width;
-                CGFloat scaleY = (CGFloat)height / sceneSnapshot.size.height;
-                sceneImage = [sceneImage imageByApplyingTransform:CGAffineTransformMakeScale(scaleX, scaleY)];
+                // Uniform scale: the crop shares the snapshot's aspect, so one
+                // factor maps the scene layer onto it without distortion.
+                CGFloat sceneScale = crop.size.width / sceneSnapshot.size.width;
+                CIImage *sceneImage = [[[CIImage alloc] initWithImage:sceneSnapshot]
+                                       imageByApplyingTransform:CGAffineTransformMakeScale(sceneScale, sceneScale)];
 
                 // Composite: scene over camera (scene has alpha where there's no 3D content)
                 CIFilter *compositeFilter = [CIFilter filterWithName:@"CISourceOverCompositing"];
@@ -678,7 +723,8 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
 
                 // Create CIContext and render to CGImage
                 CIContext *context = [CIContext contextWithOptions:nil];
-                CGImageRef cgImage = [context createCGImage:compositedImage fromRect:CGRectMake(0, 0, width, height)];
+                CGImageRef cgImage = [context createCGImage:compositedImage
+                                               fromRect:CGRectMake(0, 0, crop.size.width, crop.size.height)];
                 if (!cgImage) {
                     completionHandler(NO, nil, nil, 12); // Render failed
                     return;
