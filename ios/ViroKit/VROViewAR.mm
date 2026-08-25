@@ -636,9 +636,17 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
             return;
         }
 
-        // Capture snapshot of 3D content now (before async capture)
-        UIImage *sceneSnapshot = self.snapshot;
-        if (!sceneSnapshot) {
+        // Evidence stills are the RAW camera frame, no scene composite:
+        // GLKView's snapshot is the opaque rendered framebuffer (camera feed
+        // baked in), so compositing it over the sensor frame just replaces
+        // hi-res pixels with screen-res ones. Markers stay out of stills;
+        // AR take recording keeps burn-in. Only the view's aspect is needed,
+        // to reproduce the on-screen aspect-fill framing.
+        CGFloat viewAspect = 0.0;
+        if (self.bounds.size.height > 0) {
+            viewAspect = self.bounds.size.width / self.bounds.size.height;
+        }
+        if (viewAspect <= 0.0) {
             completionHandler(NO, nil, nil, 12); // Render failed
             return;
         }
@@ -669,7 +677,7 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
         }
 
         // Capture high-resolution frame
-        bool supported = sessioniOS->captureHighResolutionFrame([self, fileName, saveToCamera, completionHandler, sceneSnapshot, frameOrientation](
+        bool supported = sessioniOS->captureHighResolutionFrame([self, fileName, saveToCamera, completionHandler, viewAspect, frameOrientation](
                 CVPixelBufferRef image, VROMatrix4f cameraTransform, NSError *error) {
             @autoreleasepool {
                 if (error || !image) {
@@ -678,16 +686,15 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
                 }
 
                 // Rotate the sensor frame to the interface orientation the
-                // shot was framed in, then aspect-fill crop it to the screen's
+                // shot was framed in, then aspect-fill crop it to the view's
                 // aspect — the viewport shows a center-crop of the camera
-                // image, so this reproduces what the user actually saw. The
-                // old path skipped both steps and non-uniformly stretched the
-                // portrait scene snapshot over the landscape sensor frame.
+                // image (ARKit displayTransform), so this reproduces what the
+                // user actually framed.
                 CIImage *cameraImage = [[CIImage imageWithCVPixelBuffer:image]
                                         imageByApplyingOrientation:frameOrientation];
                 CGRect cameraExtent = cameraImage.extent;
 
-                CGFloat targetAspect = sceneSnapshot.size.width / sceneSnapshot.size.height;
+                CGFloat targetAspect = viewAspect;
                 CGFloat frameAspect = cameraExtent.size.width / cameraExtent.size.height;
                 CGRect crop = cameraExtent;
                 if (frameAspect > targetAspect) {
@@ -704,26 +711,9 @@ static inline VROMatrix4f viroGLConvTransform(VROMatrix4f t) {
                                imageByApplyingTransform:CGAffineTransformMakeTranslation(-crop.origin.x,
                                                                                          -crop.origin.y)];
 
-                // Uniform scale: the crop shares the snapshot's aspect, so one
-                // factor maps the scene layer onto it without distortion.
-                CGFloat sceneScale = crop.size.width / sceneSnapshot.size.width;
-                CIImage *sceneImage = [[[CIImage alloc] initWithImage:sceneSnapshot]
-                                       imageByApplyingTransform:CGAffineTransformMakeScale(sceneScale, sceneScale)];
-
-                // Composite: scene over camera (scene has alpha where there's no 3D content)
-                CIFilter *compositeFilter = [CIFilter filterWithName:@"CISourceOverCompositing"];
-                [compositeFilter setValue:sceneImage forKey:kCIInputImageKey];
-                [compositeFilter setValue:cameraImage forKey:kCIInputBackgroundImageKey];
-                CIImage *compositedImage = compositeFilter.outputImage;
-
-                if (!compositedImage) {
-                    completionHandler(NO, nil, nil, 12); // Render failed
-                    return;
-                }
-
                 // Create CIContext and render to CGImage
                 CIContext *context = [CIContext contextWithOptions:nil];
-                CGImageRef cgImage = [context createCGImage:compositedImage
+                CGImageRef cgImage = [context createCGImage:cameraImage
                                                fromRect:CGRectMake(0, 0, crop.size.width, crop.size.height)];
                 if (!cgImage) {
                     completionHandler(NO, nil, nil, 12); // Render failed
